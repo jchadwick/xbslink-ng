@@ -242,6 +242,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Make package public
+        continue-on-error: true
+        run: |
+          # Extract package name from repository
+          PACKAGE_NAME=$(echo ${{ github.repository }} | cut -d'/' -f2)
+
+          # Set package visibility to public
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            /user/packages/container/${PACKAGE_NAME} \
+            -f visibility='public' || echo "Note: Could not set package visibility. Make it public manually at https://github.com/${{ github.repository_owner }}?tab=packages"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   docker:
     name: Build Docker Image
     runs-on: ubuntu-latest
