@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -274,9 +275,9 @@ func TestFormatBytes(t *testing.T) {
 		{512, "512 B"},
 		{1023, "1023 B"},
 		{1024, "1 KB"},
-		{1536, "1 KB"},       // 1.5 KB rounds to 1 KB (integer division)
-		{1048576, "1.0 MB"},  // 1 MB
-		{1572864, "1.5 MB"},  // 1.5 MB
+		{1536, "1 KB"},      // 1.5 KB rounds to 1 KB (integer division)
+		{1048576, "1.0 MB"}, // 1 MB
+		{1572864, "1.5 MB"}, // 1.5 MB
 		{1073741824, "1.0 GB"},
 		{1610612736, "1.5 GB"},
 	}
@@ -292,13 +293,13 @@ func TestFormatBytes(t *testing.T) {
 func TestAddrEqual_Bridge(t *testing.T) {
 	tests := []struct {
 		name     string
-		a        *mockUDPAddr
-		b        *mockUDPAddr
+		a        *net.UDPAddr
+		b        *net.UDPAddr
 		expected bool
 	}{
 		{"both nil", nil, nil, true},
-		{"a nil", nil, &mockUDPAddr{}, false},
-		{"b nil", &mockUDPAddr{}, nil, false},
+		{"a nil", nil, &net.UDPAddr{}, false},
+		{"b nil", &net.UDPAddr{}, nil, false},
 	}
 
 	for _, tt := range tests {

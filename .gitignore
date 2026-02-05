@@ -1,6 +1,6 @@
 # Binaries
-xbslink-ng
-xbslink-ng.exe
+/xbslink-ng
+/xbslink-ng.exe
 xbslink-ng-*
 *.exe
 *.dll

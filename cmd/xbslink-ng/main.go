@@ -5,13 +5,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/xbslink/xbslink-ng/internal/bridge"
 	"github.com/xbslink/xbslink-ng/internal/capture"
+	"github.com/xbslink/xbslink-ng/internal/discovery"
 	"github.com/xbslink/xbslink-ng/internal/logging"
 	"github.com/xbslink/xbslink-ng/internal/protocol"
 	"github.com/xbslink/xbslink-ng/internal/transport"
@@ -69,7 +73,7 @@ Flags for listen/connect:
   --port            UDP port (listen: port to bind, connect: optional local port)
   --address         Peer's IP:port (connect mode only, required)
   --interface       Network interface name (required)
-  --xbox-mac        Xbox MAC address in XX:XX:XX:XX:XX:XX format (required)
+  --xbox-mac        Xbox MAC address (auto-detected if omitted)
   --key             Pre-shared key for authentication (strongly recommended)
   --log             Log level: error|warn|info|debug|trace (default: info)
   --stats-interval  Seconds between stats output, 0 to disable (default: 30)
@@ -119,7 +123,7 @@ func runListen(args []string) {
 
 	port := fs.Uint("port", defaultPort, "UDP port to listen on")
 	ifaceName := fs.String("interface", "", "Network interface name (required)")
-	xboxMAC := fs.String("xbox-mac", "", "Xbox MAC address (required)")
+	xboxMAC := fs.String("xbox-mac", "", "Xbox MAC address (auto-detected if omitted)")
 	key := fs.String("key", "", "Pre-shared key for authentication")
 	logLevel := fs.String("log", defaultLogLevel, "Log level: error|warn|info|debug|trace")
 	statsInterval := fs.Uint("stats-interval", defaultStatsInterval, "Seconds between stats output (0 to disable)")
@@ -130,10 +134,6 @@ func runListen(args []string) {
 	if *ifaceName == "" {
 		fmt.Fprintln(os.Stderr, "Error: --interface is required")
 		fmt.Fprintln(os.Stderr, "\nRun 'xbslink-ng interfaces' to list available interfaces.")
-		os.Exit(1)
-	}
-	if *xboxMAC == "" {
-		fmt.Fprintln(os.Stderr, "Error: --xbox-mac is required")
 		os.Exit(1)
 	}
 	if *port == 0 || *port > 65535 {
@@ -150,7 +150,7 @@ func runConnect(args []string) {
 	address := fs.String("address", "", "Peer address in IP:port format (required)")
 	port := fs.Uint("port", 0, "Local UDP port (0 = auto-assign)")
 	ifaceName := fs.String("interface", "", "Network interface name (required)")
-	xboxMAC := fs.String("xbox-mac", "", "Xbox MAC address (required)")
+	xboxMAC := fs.String("xbox-mac", "", "Xbox MAC address (auto-detected if omitted)")
 	key := fs.String("key", "", "Pre-shared key for authentication")
 	logLevel := fs.String("log", defaultLogLevel, "Log level: error|warn|info|debug|trace")
 	statsInterval := fs.Uint("stats-interval", defaultStatsInterval, "Seconds between stats output (0 to disable)")
@@ -165,10 +165,6 @@ func runConnect(args []string) {
 	if *ifaceName == "" {
 		fmt.Fprintln(os.Stderr, "Error: --interface is required")
 		fmt.Fprintln(os.Stderr, "\nRun 'xbslink-ng interfaces' to list available interfaces.")
-		os.Exit(1)
-	}
-	if *xboxMAC == "" {
-		fmt.Fprintln(os.Stderr, "Error: --xbox-mac is required")
 		os.Exit(1)
 	}
 
@@ -218,11 +214,50 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 		logger.Info("Authentication enabled (HMAC-SHA256)")
 	}
 
-	// Parse Xbox MAC address
-	mac, err := capture.ParseMAC(xboxMACStr)
-	if err != nil {
-		logger.Error("Invalid Xbox MAC address: %v", err)
-		os.Exit(1)
+	// Get Xbox MAC address - either from flag or via auto-discovery
+	var mac net.HardwareAddr
+	if xboxMACStr != "" {
+		// Parse provided MAC address
+		var err error
+		mac, err = capture.ParseMAC(xboxMACStr)
+		if err != nil {
+			logger.Error("Invalid Xbox MAC address: %v", err)
+			os.Exit(1)
+		}
+	} else {
+		// Auto-discover Xbox MAC by listening for System Link traffic
+		logger.Info("No --xbox-mac specified, listening for System Link traffic (UDP port 3074)...")
+		logger.Info("Start a System Link game on your Xbox to detect it automatically.")
+
+		// Create a cancellable context for discovery
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Handle Ctrl+C during discovery
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigCh
+			cancel()
+		}()
+
+		result, err := discovery.Discover(ctx, discovery.Config{
+			Interface: ifaceName,
+			Logger:    logger,
+		})
+
+		signal.Stop(sigCh)
+
+		if err != nil {
+			if err == discovery.ErrDiscoveryCancelled {
+				logger.Info("Discovery cancelled")
+				os.Exit(0)
+			}
+			logger.Error("Discovery failed: %v", err)
+			os.Exit(1)
+		}
+
+		mac = result.MAC
+		logger.Info("Found Xbox: %s", mac)
 	}
 
 	// Find and display interface info
