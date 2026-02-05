@@ -49,9 +49,21 @@ One side must be able to **port forward** a UDP port through their router.
 
 ## Installation
 
+### Option 1: Docker (Recommended)
+
+The easiest way to run xbslink-ng is via Docker. No installation required except Docker itself:
+
+```bash
+docker pull ghcr.io/xbslink/xbslink-ng:latest
+```
+
+See the [Docker Usage](#docker-usage) section below for examples.
+
+### Option 2: Binary Download
+
 Download the latest release for your platform from the [Releases](https://github.com/your-repo/xbslink-ng/releases) page.
 
-Or build from source:
+### Option 3: Build from Source
 
 ```bash
 go build -o xbslink-ng ./cmd/xbslink-ng
@@ -183,6 +195,96 @@ Xbox A                    xbslink-ng A              xbslink-ng B                
    │                           │◄── UDP [FRAME] ──────────│                           │
    │◄── L2 inject ─────────────│                          │                           │
 ```
+
+## Docker Usage
+
+### Running with Docker
+
+Docker containers require special flags to access host network interfaces and perform packet capture:
+
+- `--net=host` - Access host network interfaces
+- `--cap-add=NET_RAW` - Raw packet capture capability
+- `--cap-add=NET_ADMIN` - Network interface control
+
+**Listen mode example:**
+
+```bash
+docker run --rm \
+  --net=host \
+  --cap-add=NET_RAW \
+  --cap-add=NET_ADMIN \
+  ghcr.io/xbslink/xbslink-ng:latest \
+  listen --port 31415 --interface eth0 --xbox-mac 00:50:F2:XX:XX:XX --key "mysecretkey"
+```
+
+**Connect mode example:**
+
+```bash
+docker run --rm \
+  --net=host \
+  --cap-add=NET_RAW \
+  --cap-add=NET_ADMIN \
+  ghcr.io/xbslink/xbslink-ng:latest \
+  connect --address 1.2.3.4:31415 --interface eth0 --xbox-mac 00:50:F2:YY:YY:YY --key "mysecretkey"
+```
+
+**List network interfaces:**
+
+```bash
+docker run --rm \
+  --net=host \
+  --cap-add=NET_RAW \
+  --cap-add=NET_ADMIN \
+  ghcr.io/xbslink/xbslink-ng:latest \
+  interfaces
+```
+
+### Docker Compose
+
+For easier management, use docker-compose. See [docker-compose.yml](docker-compose.yml) for a full example.
+
+**Listen mode:**
+
+```yaml
+version: '3.8'
+services:
+  xbslink-ng:
+    image: ghcr.io/xbslink/xbslink-ng:latest
+    container_name: xbslink-ng
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    command: >
+      listen
+      --port 31415
+      --interface eth0
+      --xbox-mac 00:50:F2:XX:XX:XX
+      --key "mysecretkey"
+    restart: unless-stopped
+```
+
+Then run with:
+
+```bash
+docker-compose up -d
+```
+
+### Home Assistant Integration
+
+xbslink-ng can run as a Home Assistant add-on or container. The Docker image is fully compatible with Home Assistant OS.
+
+**Using as a Home Assistant Add-on:**
+
+A dedicated Home Assistant add-on will be published separately. Until then, you can run xbslink-ng as a regular Docker container on the same host as Home Assistant.
+
+**Network Configuration:**
+
+Since the container needs `--net=host`, it will share the host's network stack. Make sure your Xbox is connected to the same network as your Home Assistant instance.
+
+**Configuration:**
+
+You can configure xbslink-ng via environment variables or command-line arguments. For Home Assistant, create an automation or script to start/stop the container as needed.
 
 ## Troubleshooting
 

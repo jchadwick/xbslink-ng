@@ -1,0 +1,98 @@
+# Docker Compose configuration for xbslink-ng
+# Choose one of the services below based on your setup
+
+version: '3.8'
+
+services:
+  # LISTEN MODE - Use this if you have port forwarding set up
+  # This machine will accept incoming connections from peers
+  xbslink-listen:
+    image: ghcr.io/xbslink/xbslink-ng:latest
+    container_name: xbslink-ng-listen
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    command: >
+      listen
+      --port 31415
+      --interface eth0
+      --xbox-mac 00:50:F2:XX:XX:XX
+      --key "changeme-shared-secret-key"
+      --log info
+      --stats-interval 30
+    restart: unless-stopped
+    # Uncomment to run only when manually started
+    # profiles:
+    #   - listen
+
+  # CONNECT MODE - Use this to connect to a listening peer
+  # Replace the IP address with your peer's public IP
+  xbslink-connect:
+    image: ghcr.io/xbslink/xbslink-ng:latest
+    container_name: xbslink-ng-connect
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    command: >
+      connect
+      --address 1.2.3.4:31415
+      --interface eth0
+      --xbox-mac 00:50:F2:YY:YY:YY
+      --key "changeme-shared-secret-key"
+      --log info
+      --stats-interval 30
+    restart: unless-stopped
+    # Uncomment to run only when manually started
+    # profiles:
+    #   - connect
+
+  # AUTO-DISCOVER MODE (Listen with auto-detection)
+  # Automatically detects Xbox MAC by monitoring System Link traffic
+  xbslink-auto:
+    image: ghcr.io/xbslink/xbslink-ng:latest
+    container_name: xbslink-ng-auto
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    command: >
+      listen
+      --port 31415
+      --interface eth0
+      --key "changeme-shared-secret-key"
+      --log info
+      --stats-interval 30
+    restart: unless-stopped
+    # Uncomment to run only when manually started
+    # profiles:
+    #   - auto
+
+# USAGE INSTRUCTIONS:
+#
+# 1. Edit the configuration above:
+#    - Replace 'eth0' with your network interface (run: docker run --rm --net=host --cap-add=NET_RAW --cap-add=NET_ADMIN ghcr.io/xbslink/xbslink-ng:latest interfaces)
+#    - Replace Xbox MAC addresses with your actual Xbox MAC addresses
+#    - Replace 'changeme-shared-secret-key' with a strong shared secret (same on both peers)
+#    - For connect mode, replace '1.2.3.4:31415' with your peer's IP and port
+#
+# 2. Choose which service to run:
+#    - For listen mode: docker-compose up -d xbslink-listen
+#    - For connect mode: docker-compose up -d xbslink-connect
+#    - For auto-discovery: docker-compose up -d xbslink-auto
+#
+# 3. View logs:
+#    docker-compose logs -f
+#
+# 4. Stop the service:
+#    docker-compose down
+#
+# NOTES:
+#
+# - The container requires --net=host to access host network interfaces
+# - The container requires CAP_NET_RAW and CAP_NET_ADMIN for packet capture
+# - Make sure to port forward UDP 31415 on your router if using listen mode
+# - Both peers must use the same --key for authentication
+# - Auto-discovery mode requires you to start a System Link game on your Xbox
+#   to detect the Xbox MAC address automatically
