@@ -319,13 +319,6 @@ func (b *Bridge) setState(state State) {
 	b.state = state
 }
 
-// getState returns the current connection state.
-func (b *Bridge) getState() State {
-	b.stateMu.RLock()
-	defer b.stateMu.RUnlock()
-	return b.state
-}
-
 // captureLoop reads packets from pcap and sends them to the send channel.
 func (b *Bridge) captureLoop(ctx context.Context) {
 	b.logger.Debug("Capture loop started")
