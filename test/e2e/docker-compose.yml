@@ -1,0 +1,105 @@
+version: "3.8"
+
+services:
+  # Bridge A - Listen mode
+  bridge-a:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      xbslink-net:
+        ipv4_address: 172.20.0.10
+    environment:
+      - XBOX_MAC=00:50:F2:AA:AA:AA
+      - MODE=listen
+      - PORT=31415
+    command: >
+      sh -c "
+        echo 'Bridge A starting in listen mode...' &&
+        xbslink-ng listen 
+          --port 31415 
+          --interface eth0 
+          --xbox-mac 00:50:F2:AA:AA:AA 
+          --log debug
+      "
+    healthcheck:
+      test: ["CMD", "pgrep", "xbslink-ng"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  # Bridge B - Connect mode
+  bridge-b:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      xbslink-net:
+        ipv4_address: 172.20.0.20
+    environment:
+      - XBOX_MAC=00:50:F2:BB:BB:BB
+      - MODE=connect
+      - PEER_ADDRESS=172.20.0.10:31415
+    depends_on:
+      bridge-a:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Bridge B starting in connect mode...' &&
+        sleep 2 &&
+        xbslink-ng connect 
+          --address 172.20.0.10:31415 
+          --interface eth0 
+          --xbox-mac 00:50:F2:BB:BB:BB 
+          --log debug
+      "
+    healthcheck:
+      test: ["CMD", "pgrep", "xbslink-ng"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  # Test runner - orchestrates E2E tests
+  test-runner:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      xbslink-net:
+        ipv4_address: 172.20.0.100
+    depends_on:
+      bridge-a:
+        condition: service_healthy
+      bridge-b:
+        condition: service_healthy
+    environment:
+      - BRIDGE_A_IP=172.20.0.10
+      - BRIDGE_B_IP=172.20.0.20
+      - XBOX_MAC_A=00:50:F2:AA:AA:AA
+      - XBOX_MAC_B=00:50:F2:BB:BB:BB
+    command: >
+      sh -c "
+        echo 'Test runner starting...' &&
+        sleep 5 &&
+        xbox-sim test 
+          --bridge-a 172.20.0.10 
+          --bridge-b 172.20.0.20
+          --xbox-mac-a 00:50:F2:AA:AA:AA
+          --xbox-mac-b 00:50:F2:BB:BB:BB
+      "
+
+networks:
+  xbslink-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24

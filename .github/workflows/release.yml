@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g., v1.0.0)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native builds on each platform to avoid CGO cross-compilation issues
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - name: Install libpcap (Linux)
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
+      - name: Install Npcap SDK (Windows)
+        if: matrix.goos == 'windows'
+        run: |
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile "npcap-sdk.zip"
+          Expand-Archive -Path "npcap-sdk.zip" -DestinationPath "npcap-sdk"
+          echo "CGO_CFLAGS=-I${{ github.workspace }}/npcap-sdk/Include" >> $env:GITHUB_ENV
+          echo "CGO_LDFLAGS=-L${{ github.workspace }}/npcap-sdk/Lib/x64" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+        run: |
+          go build -v -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o xbslink-ng${{ matrix.ext }} ./cmd/xbslink-ng
+
+      - name: Create archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          tar -czvf xbslink-ng-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz xbslink-ng${{ matrix.ext }} README.md
+
+      - name: Create archive (zip)
+        if: matrix.archive == 'zip'
+        run: |
+          7z a xbslink-ng-${{ matrix.goos }}-${{ matrix.goarch }}.zip xbslink-ng${{ matrix.ext }} README.md
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xbslink-ng-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: xbslink-ng-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: xbslink-ng ${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/xbslink-ng-linux-amd64/xbslink-ng-linux-amd64.tar.gz
+            artifacts/xbslink-ng-darwin-amd64/xbslink-ng-darwin-amd64.tar.gz
+            artifacts/xbslink-ng-darwin-arm64/xbslink-ng-darwin-arm64.tar.gz
+            artifacts/xbslink-ng-windows-amd64/xbslink-ng-windows-amd64.zip
+          body: |
+            ## Installation
+
+            Download the appropriate archive for your platform and extract it.
+
+            ### Requirements
+
+            - **Windows**: [Npcap](https://npcap.com/) (install with "WinPcap API-compatible Mode")
+            - **macOS**: Run with `sudo`
+            - **Linux**: Run with `sudo` or set capabilities
+
+            See the [README](https://github.com/${{ github.repository }}#readme) for usage instructions.
