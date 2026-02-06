@@ -23,8 +23,11 @@ jobs:
       - name: Install libpcap
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
-      - name: Run go vet
-        run: go vet ./...
+      - name: Install lefthook
+        run: go install github.com/evilmartians/lefthook@latest
+
+      - name: Run lefthook (pre-commit checks)
+        run: lefthook run pre-commit
 
       - name: Install staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@latest

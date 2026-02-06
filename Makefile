@@ -1,9 +1,25 @@
 # xbslink-ng Makefile
 
-.PHONY: all build test test-race test-cover test-int test-bench test-fuzz test-e2e test-all clean
+.PHONY: all build test test-race test-cover test-int test-bench test-fuzz test-e2e test-all clean setup install-hooks
 
 # Default target
 all: build
+
+# Initial project setup (install hooks, download tools)
+setup: install-hooks
+	@echo "Setting up project..."
+	@go mod download
+	@echo "✓ Project setup complete"
+
+# Install git hooks via lefthook
+install-hooks:
+	@echo "Installing git hooks..."
+	@command -v lefthook >/dev/null 2>&1 || { \
+		echo "Installing lefthook..."; \
+		go install github.com/evilmartians/lefthook@latest; \
+	}
+	@lefthook install
+	@echo "✓ Git hooks installed"
 
 # Build the main binary
 build:
@@ -73,6 +89,8 @@ ci: lint test-race test-int
 # Help
 help:
 	@echo "Available targets:"
+	@echo "  setup       - Initial project setup (install hooks, download tools)"
+	@echo "  install-hooks - Install git hooks via lefthook"
 	@echo "  build       - Build the xbslink-ng binary"
 	@echo "  test        - Run unit tests"
 	@echo "  test-race   - Run unit tests with race detector"

@@ -1,0 +1,30 @@
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      glob: "*.go"
+      run: |
+        FILES=$(gofmt -l {staged_files})
+        if [ -n "$FILES" ]; then
+          echo "Error: The following files are not formatted with gofmt:"
+          echo "$FILES"
+          echo ""
+          echo "Run: gofmt -w {staged_files}"
+          exit 1
+        fi
+    vet:
+      glob: "*.go"
+      run: go vet ./...
+    staticcheck:
+      glob: "*.go"
+      run: staticcheck ./...
+      # Optional - won't fail if staticcheck is not installed
+      skip:
+        - merge
+        - rebase
+      fail_text: "staticcheck found issues (install with: go install honnef.co/go/tools/cmd/staticcheck@latest)"
+
+pre-push:
+  commands:
+    tests:
+      run: go test -timeout 30s ./...

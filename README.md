@@ -346,17 +346,41 @@ GOOS=linux GOARCH=amd64 go build -o xbslink-ng-linux ./cmd/xbslink-ng
 
 ## Development
 
-### Git Hooks
+### Getting Started
 
-This project includes git hooks to maintain code quality:
-
-- **pre-commit**: Runs `gofmt` and `go vet` on staged files
-- **pre-push**: Runs all unit tests before pushing
-
-**Install hooks:**
+After cloning the repository, run the setup command to install git hooks and dependencies:
 
 ```bash
-./scripts/install-hooks.sh
+make setup
+```
+
+This will:
+- Install [Lefthook](https://github.com/evilmartians/lefthook) git hooks manager
+- Set up pre-commit hooks (format checks, linting)
+- Set up pre-push hooks (unit tests)
+- Download project dependencies
+
+### Git Hooks
+
+This project uses [Lefthook](https://github.com/evilmartians/lefthook) to manage git hooks, similar to Husky in the Node.js ecosystem.
+
+**Hooks are automatically enforced:**
+- ✅ **pre-commit**: Runs `gofmt` and `go vet` on staged Go files
+- ✅ **pre-push**: Runs all unit tests before pushing
+
+**Manual installation** (if needed):
+
+```bash
+make install-hooks
+# or directly:
+lefthook install
+```
+
+**Run hooks manually:**
+
+```bash
+lefthook run pre-commit   # Run pre-commit checks
+lefthook run pre-push     # Run pre-push checks
 ```
 
 **Bypass hooks** (not recommended):
@@ -364,42 +388,58 @@ This project includes git hooks to maintain code quality:
 ```bash
 git commit --no-verify
 git push --no-verify
+# or set LEFTHOOK=0:
+LEFTHOOK=0 git commit -m "skip hooks"
 ```
 
 ### Running Tests
 
 ```bash
 # Run all tests
-go test ./...
+make test
+
+# Run tests with race detector
+make test-race
 
 # Run tests with coverage
-go test -cover ./...
+make test-cover
 
-# Run tests with verbose output
-go test -v ./...
+# Run integration tests
+make test-int
 
-# Run specific package tests
-go test ./internal/bridge
+# Run benchmarks
+make test-bench
+
+# Run all tests (unit + integration + benchmarks)
+make test-all
 ```
 
 ### Code Quality
 
-Format code before committing:
+**Format code:**
 
 ```bash
-gofmt -w .
+make fmt
 ```
 
-Run linter:
+**Run linters:**
 
 ```bash
-go vet ./...
+make lint
 ```
 
-If you have [staticcheck](https://staticcheck.io/) installed:
+**CI checks locally:**
 
 ```bash
-staticcheck ./...
+make ci
+```
+
+### Available Make Targets
+
+Run `make help` to see all available targets:
+
+```bash
+make help
 ```
 
 ## License
