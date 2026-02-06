@@ -12,19 +12,85 @@ on:
         type: string
 
 jobs:
-  build:
+  build-linux:
+    name: Build Linux ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: armv7
+            platform: linux/arm/v7
+          - arch: arm64
+            platform: linux/arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build static binary
+        run: |
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --build-arg VERSION=${{ steps.version.outputs.VERSION }} \
+            --target binary \
+            --output type=local,dest=./out \
+            -f - . << 'EOF'
+          FROM golang:alpine AS builder
+          ARG VERSION=dev
+
+          RUN apk add --no-cache git make libpcap-dev gcc musl-dev
+
+          WORKDIR /build
+          COPY go.mod go.sum ./
+          RUN go mod download
+          COPY . .
+
+          # Build statically linked binary
+          RUN CGO_ENABLED=1 go build \
+                -ldflags="-s -w -linkmode external -extldflags '-static' -X main.Version=${VERSION}" \
+                -o xbslink-ng \
+                ./cmd/xbslink-ng
+
+          FROM scratch AS binary
+          COPY --from=builder /build/xbslink-ng /xbslink-ng
+          EOF
+
+      - name: Create archive
+        run: |
+          cd out
+          tar -czvf ../xbslink-ng-linux-${{ matrix.arch }}.tar.gz xbslink-ng
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xbslink-ng-linux-${{ matrix.arch }}
+          path: xbslink-ng-linux-${{ matrix.arch }}.tar.gz
+
+  build-other:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Native builds on each platform to avoid CGO cross-compilation issues
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            ext: ""
-            archive: tar.gz
           - os: windows-latest
             goos: windows
             goarch: amd64
@@ -50,10 +116,6 @@ jobs:
         with:
           go-version: "1.21"
           cache: true
-
-      - name: Install libpcap (Linux)
-        if: matrix.goos == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
       - name: Install Npcap SDK (Windows)
         if: matrix.goos == 'windows'
@@ -101,7 +163,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [build-linux, build-other]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -137,6 +199,8 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/xbslink-ng-linux-amd64/xbslink-ng-linux-amd64.tar.gz
+            artifacts/xbslink-ng-linux-armv7/xbslink-ng-linux-armv7.tar.gz
+            artifacts/xbslink-ng-linux-arm64/xbslink-ng-linux-arm64.tar.gz
             artifacts/xbslink-ng-darwin-amd64/xbslink-ng-darwin-amd64.tar.gz
             artifacts/xbslink-ng-darwin-arm64/xbslink-ng-darwin-arm64.tar.gz
             artifacts/xbslink-ng-windows-amd64/xbslink-ng-windows-amd64.zip
@@ -144,6 +208,12 @@ jobs:
             ## Installation
 
             Download the appropriate archive for your platform and extract it.
+
+            ### Supported Platforms
+
+            - **Linux**: amd64, armv7 (Raspberry Pi 2/3), arm64 (Raspberry Pi 4/5)
+            - **macOS**: amd64 (Intel), arm64 (Apple Silicon)
+            - **Windows**: amd64
 
             ### Requirements
 
