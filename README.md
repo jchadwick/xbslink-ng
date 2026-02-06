@@ -360,6 +360,20 @@ This will:
 - Set up pre-push hooks (unit tests)
 - Download project dependencies
 
+**Important:** Ensure `$HOME/go/bin` is in your PATH for git hooks to work:
+
+```bash
+# Add to your ~/.bashrc, ~/.zshrc, or equivalent
+export PATH="$HOME/go/bin:$PATH"
+```
+
+Or use [direnv](https://direnv.net/) with the provided `.envrc.example`:
+
+```bash
+cp .envrc.example .envrc
+direnv allow
+```
+
 ### Git Hooks
 
 This project uses [Lefthook](https://github.com/evilmartians/lefthook) to manage git hooks, similar to Husky in the Node.js ecosystem.

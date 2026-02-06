@@ -1,0 +1,11 @@
+# Example environment configuration
+# Copy this to .envrc and source it, or add to your shell profile
+
+# Add Go binaries to PATH for lefthook git hooks
+export PATH="$HOME/go/bin:$PATH"
+
+# Optional: Enable verbose lefthook output
+# export LEFTHOOK_VERBOSE=1
+
+# Optional: Disable lefthook
+# export LEFTHOOK=0

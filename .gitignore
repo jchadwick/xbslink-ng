@@ -33,6 +33,7 @@ go.work.sum
 # Environment and secrets
 .env
 .env.*
+.envrc
 *.pem
 *.key
 
