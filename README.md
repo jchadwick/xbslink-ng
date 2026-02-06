@@ -344,6 +344,64 @@ GOOS=darwin GOARCH=amd64 go build -o xbslink-ng-mac ./cmd/xbslink-ng
 GOOS=linux GOARCH=amd64 go build -o xbslink-ng-linux ./cmd/xbslink-ng
 ```
 
+## Development
+
+### Git Hooks
+
+This project includes git hooks to maintain code quality:
+
+- **pre-commit**: Runs `gofmt` and `go vet` on staged files
+- **pre-push**: Runs all unit tests before pushing
+
+**Install hooks:**
+
+```bash
+./scripts/install-hooks.sh
+```
+
+**Bypass hooks** (not recommended):
+
+```bash
+git commit --no-verify
+git push --no-verify
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+go test ./...
+
+# Run tests with coverage
+go test -cover ./...
+
+# Run tests with verbose output
+go test -v ./...
+
+# Run specific package tests
+go test ./internal/bridge
+```
+
+### Code Quality
+
+Format code before committing:
+
+```bash
+gofmt -w .
+```
+
+Run linter:
+
+```bash
+go vet ./...
+```
+
+If you have [staticcheck](https://staticcheck.io/) installed:
+
+```bash
+staticcheck ./...
+```
+
 ## License
 
 MIT License - See [LICENSE](LICENSE) for details.

@@ -1,0 +1,24 @@
+#!/bin/bash
+# Pre-push hook: Run unit tests before pushing
+
+set -e
+
+echo "Running pre-push checks..."
+
+# Check if go is installed
+if ! command -v go &> /dev/null; then
+    echo "Error: go is not installed"
+    exit 1
+fi
+
+# Run unit tests
+echo "Running unit tests..."
+if ! go test -timeout 30s ./...; then
+    echo ""
+    echo "Error: Unit tests failed"
+    echo "Fix the failing tests before pushing"
+    exit 1
+fi
+
+echo "✓ All tests passed"
+exit 0
