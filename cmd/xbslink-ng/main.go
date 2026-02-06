@@ -15,6 +15,7 @@ import (
 
 	"github.com/xbslink/xbslink-ng/internal/bridge"
 	"github.com/xbslink/xbslink-ng/internal/capture"
+	"github.com/xbslink/xbslink-ng/internal/config"
 	"github.com/xbslink/xbslink-ng/internal/discovery"
 	"github.com/xbslink/xbslink-ng/internal/logging"
 	"github.com/xbslink/xbslink-ng/internal/protocol"
@@ -214,50 +215,39 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 		logger.Info("Authentication enabled (HMAC-SHA256)")
 	}
 
-	// Get Xbox MAC address - either from flag or via auto-discovery
+	// Load saved config
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Warn("Failed to load config: %v", err)
+		cfg = &config.Config{} // Use empty config
+	}
+
+	// Determine Xbox MAC address
 	var mac net.HardwareAddr
+	var needsDiscovery bool
+
 	if xboxMACStr != "" {
-		// Parse provided MAC address
-		var err error
+		// Use provided MAC address (overrides saved config)
 		mac, err = capture.ParseMAC(xboxMACStr)
 		if err != nil {
 			logger.Error("Invalid Xbox MAC address: %v", err)
 			os.Exit(1)
 		}
+		logger.Info("Using Xbox MAC from --xbox-mac: %s", mac)
+	} else if savedMAC := cfg.GetXboxMAC(); savedMAC != nil {
+		// Use saved MAC from config
+		mac = savedMAC
+		logger.Info("Using saved Xbox MAC from config: %s", mac)
 	} else {
-		// Auto-discover Xbox MAC by listening for System Link traffic
-		logger.Info("No --xbox-mac specified, listening for System Link traffic (UDP port 3074)...")
-		logger.Info("Start a System Link game on your Xbox to detect it automatically.")
-
-		// Create a cancellable context for discovery
-		ctx, cancel := context.WithCancel(context.Background())
-
-		// Handle Ctrl+C during discovery
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-		go func() {
-			<-sigCh
-			cancel()
-		}()
-
-		result, err := discovery.Discover(ctx, discovery.Config{
-			Interface: ifaceName,
-			Logger:    logger,
-		})
-
-		signal.Stop(sigCh)
-
-		if err != nil {
-			if err == discovery.ErrDiscoveryCancelled {
-				logger.Info("Discovery cancelled")
-				os.Exit(0)
-			}
-			logger.Error("Discovery failed: %v", err)
-			os.Exit(1)
+		// No MAC available, will need discovery
+		needsDiscovery = true
+		if mode == transport.ModeListen {
+			logger.Info("No Xbox MAC available, will auto-discover in background")
+			logger.Info("Start a System Link game on your Xbox to detect it automatically")
+		} else {
+			logger.Info("No --xbox-mac specified, listening for System Link traffic (UDP port 3074)...")
+			logger.Info("Start a System Link game on your Xbox to detect it automatically")
 		}
-
-		mac = result.MAC
-		logger.Info("Found Xbox: %s", mac)
 	}
 
 	// Find and display interface info
@@ -273,20 +263,23 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 		addrStr = iface.Addresses[0]
 	}
 	logger.Info("Interface: %s (%s)", iface.Name, addrStr)
-	logger.Info("Xbox MAC: %s", mac)
 
 	// Create protocol codec
 	codec := protocol.NewCodec(keyBytes)
 
-	// Create capture
-	cap, err := capture.New(capture.Config{
-		Interface: ifaceName,
-		XboxMAC:   mac,
-		Logger:    logger,
-	})
-	if err != nil {
-		logger.Error("Failed to open capture: %v", err)
-		os.Exit(1)
+	// Create capture if we have a MAC, otherwise nil
+	var cap *capture.Capture
+	if mac != nil {
+		logger.Info("Xbox MAC: %s", mac)
+		cap, err = capture.New(capture.Config{
+			Interface: ifaceName,
+			XboxMAC:   mac,
+			Logger:    logger,
+		})
+		if err != nil {
+			logger.Error("Failed to open capture: %v", err)
+			os.Exit(1)
+		}
 	}
 
 	// Create transport
@@ -299,11 +292,13 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 	})
 	if err != nil {
 		logger.Error("Failed to create transport: %v", err)
-		cap.Close()
+		if cap != nil {
+			cap.Close()
+		}
 		os.Exit(1)
 	}
 
-	// Create and run bridge
+	// Create bridge (capture may be nil)
 	br, err := bridge.New(bridge.Config{
 		Capture:       cap,
 		Transport:     trans,
@@ -315,14 +310,140 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 	if err != nil {
 		logger.Error("Failed to create bridge: %v", err)
 		trans.Close()
-		cap.Close()
+		if cap != nil {
+			cap.Close()
+		}
 		os.Exit(1)
 	}
 
-	// Run until shutdown
+	// If discovery is needed, run it in background (for listen mode) or foreground (for connect mode)
 	ctx := context.Background()
+	if needsDiscovery {
+		if mode == transport.ModeListen {
+			// Run discovery in background for listen mode
+			go runBackgroundDiscovery(ctx, ifaceName, br, cfg, logger)
+		} else {
+			// Run discovery in foreground for connect mode (blocking)
+			mac = runForegroundDiscovery(ctx, ifaceName, logger)
+			if mac == nil {
+				// Discovery was cancelled or failed
+				os.Exit(1)
+			}
+
+			// Save discovered MAC
+			cfg.SetXboxMAC(mac)
+			if err := cfg.Save(); err != nil {
+				logger.Warn("Failed to save config: %v", err)
+			} else {
+				logger.Info("Saved Xbox MAC to config: %s", mac)
+			}
+
+			// Create capture with discovered MAC
+			logger.Info("Xbox MAC: %s", mac)
+			cap, err = capture.New(capture.Config{
+				Interface: ifaceName,
+				XboxMAC:   mac,
+				Logger:    logger,
+			})
+			if err != nil {
+				logger.Error("Failed to open capture: %v", err)
+				trans.Close()
+				os.Exit(1)
+			}
+
+			// Set capture on bridge
+			if err := br.SetCapture(cap); err != nil {
+				logger.Error("Failed to set capture: %v", err)
+				cap.Close()
+				trans.Close()
+				os.Exit(1)
+			}
+		}
+	}
+
+	// Run until shutdown
 	if err := br.Run(ctx); err != nil {
 		logger.Error("Bridge error: %v", err)
 		os.Exit(1)
 	}
+}
+
+// runBackgroundDiscovery runs Xbox discovery in the background and sets capture when found.
+func runBackgroundDiscovery(ctx context.Context, ifaceName string, br *bridge.Bridge, cfg *config.Config, logger *logging.Logger) {
+	result, err := discovery.Discover(ctx, discovery.Config{
+		Interface: ifaceName,
+		Logger:    logger,
+	})
+
+	if err != nil {
+		if err == discovery.ErrDiscoveryCancelled {
+			logger.Debug("Background discovery cancelled")
+		} else {
+			logger.Warn("Background discovery failed: %v", err)
+		}
+		return
+	}
+
+	mac := result.MAC
+	logger.Info("Found Xbox: %s", mac)
+
+	// Save discovered MAC to config
+	cfg.SetXboxMAC(mac)
+	if err := cfg.Save(); err != nil {
+		logger.Warn("Failed to save config: %v", err)
+	} else {
+		logger.Info("Saved Xbox MAC to config: %s", mac)
+	}
+
+	// Create capture with discovered MAC
+	cap, err := capture.New(capture.Config{
+		Interface: ifaceName,
+		XboxMAC:   mac,
+		Logger:    logger,
+	})
+	if err != nil {
+		logger.Error("Failed to open capture after discovery: %v", err)
+		return
+	}
+
+	// Set capture on bridge
+	if err := br.SetCapture(cap); err != nil {
+		logger.Error("Failed to set capture: %v", err)
+		cap.Close()
+		return
+	}
+}
+
+// runForegroundDiscovery runs Xbox discovery in the foreground (blocking).
+// Returns nil if discovery was cancelled or failed.
+func runForegroundDiscovery(ctx context.Context, ifaceName string, logger *logging.Logger) net.HardwareAddr {
+	// Create a cancellable context for discovery
+	discoveryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Handle Ctrl+C during discovery
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+	defer signal.Stop(sigCh)
+
+	result, err := discovery.Discover(discoveryCtx, discovery.Config{
+		Interface: ifaceName,
+		Logger:    logger,
+	})
+
+	if err != nil {
+		if err == discovery.ErrDiscoveryCancelled {
+			logger.Info("Discovery cancelled")
+		} else {
+			logger.Error("Discovery failed: %v", err)
+		}
+		return nil
+	}
+
+	logger.Info("Found Xbox: %s", result.MAC)
+	return result.MAC
 }

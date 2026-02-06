@@ -126,6 +126,7 @@ func (s *Stats) GetRTTCurrent() time.Duration {
 // Bridge coordinates all components for the xbslink-ng tunnel.
 type Bridge struct {
 	capture   *capture.Capture
+	captureMu sync.RWMutex // protects capture field
 	transport *transport.Transport
 	codec     *protocol.Codec
 	logger    *logging.Logger
@@ -152,11 +153,14 @@ type Bridge struct {
 
 	// For triggering shutdown from within the bridge
 	cancelFunc context.CancelFunc
+
+	// For capture lifecycle management
+	captureReady chan struct{} // closed when capture is set
 }
 
 // Config holds bridge configuration.
 type Config struct {
-	Capture       *capture.Capture
+	Capture       *capture.Capture // Optional: can be nil and set later via SetCapture()
 	Transport     *transport.Transport
 	Codec         *protocol.Codec
 	Logger        *logging.Logger
@@ -166,9 +170,6 @@ type Config struct {
 
 // New creates a new Bridge instance.
 func New(cfg Config) (*Bridge, error) {
-	if cfg.Capture == nil {
-		return nil, fmt.Errorf("capture is required")
-	}
 	if cfg.Transport == nil {
 		return nil, fmt.Errorf("transport is required")
 	}
@@ -179,7 +180,7 @@ func New(cfg Config) (*Bridge, error) {
 		return nil, fmt.Errorf("logger is required")
 	}
 
-	return &Bridge{
+	b := &Bridge{
 		capture:        cfg.Capture,
 		transport:      cfg.Transport,
 		codec:          cfg.Codec,
@@ -192,7 +193,39 @@ func New(cfg Config) (*Bridge, error) {
 		framesToInject: make(chan []byte, ChannelBufferSize),
 		done:           make(chan struct{}),
 		stdinCh:        make(chan struct{}),
-	}, nil
+		captureReady:   make(chan struct{}),
+	}
+
+	// If capture is provided initially, mark it as ready
+	if cfg.Capture != nil {
+		close(b.captureReady)
+	}
+
+	return b, nil
+}
+
+// SetCapture sets the capture after bridge initialization.
+// This allows starting the bridge without capture and adding it later.
+// Can only be called once, before or during Run().
+func (b *Bridge) SetCapture(cap *capture.Capture) error {
+	b.captureMu.Lock()
+	defer b.captureMu.Unlock()
+
+	if b.capture != nil {
+		return fmt.Errorf("capture already set")
+	}
+
+	b.capture = cap
+	close(b.captureReady) // signal that capture is now available
+	b.logger.Info("Capture activated, now forwarding Xbox packets")
+	return nil
+}
+
+// HasCapture returns true if capture is set.
+func (b *Bridge) HasCapture() bool {
+	b.captureMu.RLock()
+	defer b.captureMu.RUnlock()
+	return b.capture != nil
 }
 
 // Run starts the bridge and blocks until shutdown.
@@ -301,7 +334,12 @@ func (b *Bridge) Run(ctx context.Context) error {
 	// Close resources
 	close(b.done)
 	b.transport.Close()
-	b.capture.Close()
+
+	b.captureMu.RLock()
+	if b.capture != nil {
+		b.capture.Close()
+	}
+	b.captureMu.RUnlock()
 
 	// Wait for goroutines to finish
 	wg.Wait()
@@ -324,6 +362,17 @@ func (b *Bridge) captureLoop(ctx context.Context) {
 	b.logger.Debug("Capture loop started")
 	defer b.logger.Debug("Capture loop stopped")
 
+	// Wait for capture to be ready
+	select {
+	case <-ctx.Done():
+		b.logger.Debug("Capture loop cancelled before capture ready")
+		return
+	case <-b.captureReady:
+		// Capture is now available, proceed
+	}
+
+	b.logger.Debug("Capture is ready, beginning packet capture")
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -331,7 +380,17 @@ func (b *Bridge) captureLoop(ctx context.Context) {
 		default:
 		}
 
-		frame, err := b.capture.ReadPacket()
+		b.captureMu.RLock()
+		cap := b.capture
+		b.captureMu.RUnlock()
+
+		if cap == nil {
+			// Capture was removed (shouldn't happen in normal flow)
+			b.logger.Warn("Capture is nil, stopping capture loop")
+			return
+		}
+
+		frame, err := cap.ReadPacket()
 		if err != nil {
 			b.logger.Warn("Capture error: %v", err)
 			continue
@@ -529,12 +588,33 @@ func (b *Bridge) injectLoop(ctx context.Context) {
 	b.logger.Debug("Inject loop started")
 	defer b.logger.Debug("Inject loop stopped")
 
+	// Wait for capture to be ready
+	select {
+	case <-ctx.Done():
+		b.logger.Debug("Inject loop cancelled before capture ready")
+		return
+	case <-b.captureReady:
+		// Capture is now available, proceed
+	}
+
+	b.logger.Debug("Capture is ready, beginning packet injection")
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case frame := <-b.framesToInject:
-			if err := b.capture.WritePacket(frame); err != nil {
+			b.captureMu.RLock()
+			cap := b.capture
+			b.captureMu.RUnlock()
+
+			if cap == nil {
+				// Capture was removed (shouldn't happen in normal flow)
+				b.logger.Warn("Capture is nil, dropping frame")
+				continue
+			}
+
+			if err := cap.WritePacket(frame); err != nil {
 				b.logger.Warn("Injection failed: %v", err)
 				continue
 			}
