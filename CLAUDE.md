@@ -36,7 +36,12 @@ Pre-commit hooks enforced via Lefthook (gofmt, go vet). Pre-push runs tests.
 
 ## Releasing
 
-Releases are automated. The only manual step is tagging:
+**Before releasing**, ensure the Dockerfile version matches go.mod:
+1. Check `go.mod` for Go version (e.g., `go 1.25`)
+2. Update `Dockerfile` line 3: `FROM golang:1.25-alpine AS builder`
+3. Update `.github/workflows/ci.yml` and `release.yml` with same version
+
+Then tag and release:
 
 ```bash
 git tag v0.0.X && git push --tags
