@@ -52,6 +52,12 @@ See the addon repo (`jchadwick/home-assistant-addons`) for how it consumes new r
 
 Dev builds: every push to `main` creates a rolling `dev-latest` pre-release + Docker image.
 
+**IMPORTANT**: After committing and pushing to main, ALWAYS check the GitHub Actions status:
+```bash
+gh run watch  # Watch the latest workflow run
+```
+If the build fails, fix it immediately before releasing a tag.
+
 ## Architecture Notes
 
 - Bridge uses a two-tier context: app context (signal-only) + connection context (per peer)
