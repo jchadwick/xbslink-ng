@@ -1,6 +1,6 @@
 # xbslink-ng
 
-A lightweight, cross-platform P2P bridge for Xbox 360 System Link traffic. Connect two LANs over the internet for local multiplayer gaming without relying on centralized servers.
+A lightweight, cross-platform P2P bridge for Xbox System Link traffic. Connect two LANs over the internet for local multiplayer gaming without relying on centralized servers.
 
 ## Why xbslink-ng?
 
@@ -15,7 +15,7 @@ xbslink-ng establishes a **direct peer-to-peer connection** between two friends,
 │                              YOUR HOUSE                                         │
 │  ┌──────────┐      ┌─────────────────────────────────────────┐                  │
 │  │  Xbox    │      │              Your PC                    │                  │
-│  │  360     │──────│  [NIC] ◄──► xbslink-ng ◄──► [UDP]       │──────────────────┤
+│  │          │──────│  [NIC] ◄──► xbslink-ng ◄──► [UDP]       │──────────────────┤
 │  │          │  L2  │       capture/inject    encap/decap     │   UDP over       │
 │  └──────────┘      └─────────────────────────────────────────┘   Internet       │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -25,7 +25,7 @@ xbslink-ng establishes a **direct peer-to-peer connection** between two friends,
 │                           FRIEND'S HOUSE                              │         │
 │  ┌──────────┐      ┌─────────────────────────────────────────┐        │         │
 │  │  Xbox    │      │            Friend's PC                  │        │         │
-│  │  360     │──────│  [NIC] ◄──► xbslink-ng ◄──► [UDP]       │────────┘         │
+│  │          │──────│  [NIC] ◄──► xbslink-ng ◄──► [UDP]       │────────┘         │
 │  │          │  L2  │       capture/inject    encap/decap     │   :31415         │
 │  └──────────┘      └─────────────────────────────────────────┘   (port fwd)     │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -81,7 +81,7 @@ Note the interface name where your Xbox is connected (e.g., `Ethernet`, `en0`, `
 
 ### Step 2: Find your Xbox's MAC address
 
-- On Xbox 360: Settings → System → Network Settings → Configure Network → Additional Settings → Advanced Settings
+- On Xbox: Settings → System → Network Settings → Configure Network → Additional Settings → Advanced Settings
 - Or check your router's DHCP client list
 
 ### Step 3: Set up the connection
@@ -153,10 +153,10 @@ xbslink-ng monitors latency and warns you about potential issues:
 
 ```
 2024-01-15 14:32:15 [WARN]  RTT spike: 8ms → 45ms
-2024-01-15 14:32:20 [WARN]  [!] RTT 45ms exceeds Xbox 360 System Link threshold (30ms)
+2024-01-15 14:32:20 [WARN]  [!] RTT 45ms exceeds Xbox System Link threshold (30ms)
 ```
 
-Xbox 360 System Link requires <30ms latency. If you see this warning, the Xboxes may fail to connect or disconnect during play.
+Xbox System Link requires <30ms latency. If you see this warning, the Xboxes may fail to connect or disconnect during play.
 
 ## Architecture
 
@@ -303,7 +303,7 @@ You can configure xbslink-ng via environment variables or command-line arguments
 
 ### High latency / disconnections
 
-- Xbox 360 System Link requires <30ms RTT
+- Xbox System Link requires <30ms RTT
 - Check your internet connection
 - Ensure no bandwidth-heavy applications are running
 - Try switching who does port forwarding (route may be asymmetric)
@@ -312,7 +312,7 @@ You can configure xbslink-ng via environment variables or command-line arguments
 
 ### MTU and Large Frames
 
-Xbox 360 System Link uses standard 1500-byte Ethernet frames. With xbslink-ng's
+Xbox System Link uses standard 1500-byte Ethernet frames. With xbslink-ng's
 protocol overhead (1 byte type + 8 byte nonce + 32 byte HMAC = 41 bytes) plus
 UDP/IP headers (28 bytes), the total packet size can reach **1569 bytes**.
 
@@ -327,6 +327,24 @@ This exceeds the standard internet MTU of 1500 bytes, which may cause:
 2. Or configure your router's MTU if possible
 
 A future version may add compression to mitigate this.
+
+## Releasing
+
+Releases are fully automated via GitHub Actions. The only manual step is creating a git tag.
+
+### Creating a Release
+
+1. **Tag the commit**: `git tag v0.0.X && git push --tags`
+2. **CI builds automatically** (`.github/workflows/release.yml`):
+   - Static Linux binaries via Docker + QEMU (amd64, armv7, arm64)
+   - Native macOS (amd64, arm64) and Windows (amd64) binaries
+   - Creates a GitHub Release with all artifacts attached
+3. **Addon notification**: On release publish, `notify-addon-release.yaml` sends a `repository_dispatch` to the [home-assistant-addons](https://github.com/jchadwick/home-assistant-addons) repo
+   - See the addon repo for how to integrate new releases
+
+### Dev Builds
+
+Every push to `main` also creates a rolling `dev-latest` pre-release (`.github/workflows/ci.yml`) with Docker images tagged `latest` and `dev-latest` on GHCR.
 
 ## Building from Source
 
@@ -447,6 +465,100 @@ make lint
 ```bash
 make ci
 ```
+
+### Testing Tools
+
+#### xbox-sim - Xbox System Link Traffic Simulator
+
+A standalone CLI tool for E2E testing. Build it with:
+
+```bash
+go build -o xbox-sim ./test/e2e/xbox-sim
+```
+
+**Commands:**
+
+**`xbox-sim generate`** - Send simulated Xbox Ethernet frames to a target:
+
+```bash
+# Send 50 frames at 100ms intervals to a running xbslink-ng instance
+xbox-sim generate --target 192.168.1.100 --port 31415 --count 50 --interval 100ms
+```
+
+| Flag         | Default | Description                    |
+| ------------ | ------- | ------------------------------ |
+| `--target`   | (required) | Target IP address           |
+| `--port`     | 31415   | Target UDP port                |
+| `--count`    | 10      | Number of frames to generate   |
+| `--interval` | 100ms   | Interval between frames        |
+
+Frames are sent as raw Ethernet frames with Xbox OUI (`00:50:F2`) source MAC and broadcast destination. **Note:** `generate` does NOT perform the xbslink-ng protocol handshake (HELLO/HELLO_ACK) - it sends raw frames directly over UDP.
+
+**`xbox-sim test`** - Run E2E tests against a pair of running bridges:
+
+```bash
+xbox-sim test --bridge-a 172.20.0.10 --bridge-b 172.20.0.20
+```
+
+| Flag           | Default              | Description              |
+| -------------- | -------------------- | ------------------------ |
+| `--bridge-a`   | (required)           | IP address of bridge A   |
+| `--bridge-b`   | (required)           | IP address of bridge B   |
+| `--xbox-mac-a` | 00:50:F2:AA:AA:AA    | Xbox MAC for bridge A    |
+| `--xbox-mac-b` | 00:50:F2:BB:BB:BB    | Xbox MAC for bridge B    |
+
+Tests: bridge reachability, UDP connectivity, and Ethernet frame structure validation.
+
+**`xbox-sim client`** - Connect to a live server as a protocol-aware simulated peer:
+
+```bash
+# Basic: connect to a live server
+xbox-sim client --address 192.168.1.100:31415
+
+# With simulated latency and jitter
+xbox-sim client --address 1.2.3.4:31415 --latency-base 15ms --latency-jitter 5ms
+
+# With encryption
+xbox-sim client --address 1.2.3.4:31415 --key "mysecretkey"
+```
+
+| Flag               | Default    | Description                              |
+| ------------------ | ---------- | ---------------------------------------- |
+| `--address`        | (required) | Server address (host:port)               |
+| `--key`            | (empty)    | Encryption key (empty for insecure)      |
+| `--log`            | info       | Log level (error, warn, info, debug, trace) |
+| `--send-frames`    | true       | Send simulated Xbox frames               |
+| `--frame-interval` | 50ms       | Interval between sent frames             |
+| `--latency-base`   | 0          | Base simulated latency for PONG replies  |
+| `--latency-jitter` | 0          | Jitter range (±) added to base           |
+| `--latency-step`   | 5ms        | Step size for interactive +/- adjustment |
+
+The client performs a full protocol handshake (HELLO/HELLO_ACK), responds to PINGs with configurable artificial latency, and sends simulated Xbox frames. When running in a TTY, press `+`/`=` to increase base latency, `-` to decrease, or `q` to quit.
+
+#### Docker E2E Tests
+
+Spin up a full two-bridge environment with an isolated network:
+
+```bash
+make test-e2e        # Build, run tests, clean up
+make test-e2e-build  # Build containers only (for debugging)
+make test-e2e-clean  # Tear down and remove images
+```
+
+This creates three containers on a `172.20.0.0/24` network:
+- **bridge-a** (172.20.0.10) - Listen mode
+- **bridge-b** (172.20.0.20) - Connect mode, connects to bridge-a
+- **test-runner** (172.20.0.100) - Runs `xbox-sim test` after bridges are healthy
+
+#### testutil Package
+
+`test/testutil/` provides helpers for Go unit/integration tests:
+
+- `RandomBytes(n)` / `RandomMAC()` / `RandomXboxMAC()` - Generate random test data
+- `RandomFrame(size)` / `RandomEthernetFrame(src, dst, etherType, payloadSize)` - Generate Ethernet frames
+- `FreePort()` - Find an available UDP port
+- `WaitFor(timeout, condition)` - Poll until condition is true (10ms interval)
+- `MockLogger` - Thread-safe log capture with `HasMessage(level, substr)` for assertions
 
 ### Available Make Targets
 

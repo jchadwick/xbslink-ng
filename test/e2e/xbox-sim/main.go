@@ -22,6 +22,8 @@ func main() {
 		runTests()
 	case "generate":
 		runGenerate()
+	case "client":
+		runClient()
 	case "help":
 		printUsage()
 	default:
@@ -37,6 +39,7 @@ func printUsage() {
 Commands:
   test      Run E2E tests against xbslink-ng bridges
   generate  Generate traffic for manual testing
+  client    Connect to a live server as a simulated peer
   help      Show this help message
 
 Test flags:
@@ -44,6 +47,21 @@ Test flags:
   --bridge-b     IP address of bridge B
   --xbox-mac-a   Xbox MAC for bridge A (default: 00:50:F2:AA:AA:AA)
   --xbox-mac-b   Xbox MAC for bridge B (default: 00:50:F2:BB:BB:BB)
+
+Client flags:
+  --address              Server address host:port (required)
+  --key                  Encryption key (empty for insecure)
+  --log                  Log level: error, warn, info, debug, trace (default: info)
+  --send-frames          Send simulated Xbox frames (default: true)
+  --frame-interval       Interval between sent frames (default: 50ms)
+  --latency-base         Base simulated latency for PONG replies (default: 0)
+  --latency-jitter       Jitter range ± for simulated latency (default: 0)
+  --latency-step         Step size for interactive +/- adjustment (default: 5ms)
+
+Interactive keys (client, TTY only):
+  +/=  Increase base latency by step
+  -    Decrease base latency by step
+  q    Quit
 `)
 }
 
@@ -53,7 +71,7 @@ func runTests() {
 	bridgeB := fs.String("bridge-b", "", "IP address of bridge B")
 	xboxMacA := fs.String("xbox-mac-a", "00:50:F2:AA:AA:AA", "Xbox MAC for bridge A")
 	xboxMacB := fs.String("xbox-mac-b", "00:50:F2:BB:BB:BB", "Xbox MAC for bridge B")
-	
+
 	fs.Parse(os.Args[2:])
 
 	if *bridgeA == "" || *bridgeB == "" {
@@ -240,7 +258,7 @@ func runGenerate() {
 	targetPort := fs.Int("port", 31415, "Target UDP port")
 	count := fs.Int("count", 10, "Number of frames to generate")
 	interval := fs.Duration("interval", 100*time.Millisecond, "Interval between frames")
-	
+
 	fs.Parse(os.Args[2:])
 
 	if *targetIP == "" {

@@ -5,6 +5,7 @@ go 1.25
 require (
 	github.com/evilmartians/lefthook v1.13.6
 	github.com/google/gopacket v1.1.19
+	golang.org/x/term v0.28.0
 )
 
 require (
@@ -55,7 +56,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.3 // indirect
 	golang.org/x/mod v0.27.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
-	golang.org/x/term v0.28.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

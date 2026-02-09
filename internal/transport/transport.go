@@ -73,8 +73,8 @@ type Transport struct {
 // Config holds transport configuration.
 type Config struct {
 	Mode      Mode
-	LocalPort uint16          // Port to bind (listen mode) or local port (connect mode, 0 = auto)
-	PeerAddr  string          // Peer address in "host:port" format (connect mode only)
+	LocalPort uint16 // Port to bind (listen mode) or local port (connect mode, 0 = auto)
+	PeerAddr  string // Peer address in "host:port" format (connect mode only)
 	Codec     *protocol.Codec
 	Logger    *logging.Logger
 }
@@ -193,7 +193,11 @@ func (t *Transport) WaitForPeer(ctx context.Context) error {
 		// Try to decode as HELLO
 		msg, err := t.codec.Decode(t.readBuf[:n])
 		if err != nil {
-			t.logger.Debug("Received invalid message from %s: %v", addr, err)
+			if errors.Is(err, protocol.ErrMessageTooShort) && t.codec.IsSecure() {
+				t.logger.Warn("Received unreadable message from %s (pre-shared key mismatch? peer may not be using encryption)", addr)
+			} else {
+				t.logger.Debug("Received invalid message from %s: %v", addr, err)
+			}
 			continue
 		}
 
@@ -305,7 +309,11 @@ func (t *Transport) attemptHandshake(ctx context.Context) error {
 		// Decode message
 		msg, err := t.codec.Decode(t.readBuf[:n])
 		if err != nil {
-			t.logger.Debug("Invalid message from peer: %v", err)
+			if errors.Is(err, protocol.ErrMessageTooShort) && t.codec.IsSecure() {
+				t.logger.Warn("Invalid message from peer (pre-shared key mismatch? server may not be using encryption)")
+			} else {
+				t.logger.Debug("Invalid message from peer: %v", err)
+			}
 			continue
 		}
 
