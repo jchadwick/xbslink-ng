@@ -81,7 +81,7 @@ func Discover(ctx context.Context, cfg Config) (*Result, error) {
 
 	// BPF filter for Xbox System Link traffic:
 	// - UDP port 3074 (Xbox System Link port)
-	// This catches any device (Xbox 360, Xbox One, Series X, emulators) sending System Link traffic
+	// This catches any device (Xbox, emulators) sending System Link traffic
 	filter := fmt.Sprintf("udp port %d", XboxSystemLinkPort)
 
 	if err := handle.SetBPFFilter(filter); err != nil {

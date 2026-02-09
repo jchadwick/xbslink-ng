@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/xbslink/xbslink-ng/internal/capture"
+	"github.com/xbslink/xbslink-ng/internal/events"
 	"github.com/xbslink/xbslink-ng/internal/logging"
 	"github.com/xbslink/xbslink-ng/internal/protocol"
 	"github.com/xbslink/xbslink-ng/internal/transport"
@@ -130,6 +131,7 @@ type Bridge struct {
 	transport *transport.Transport
 	codec     *protocol.Codec
 	logger    *logging.Logger
+	emitter   events.Emitter
 	stats     *Stats
 
 	mode          transport.Mode
@@ -164,6 +166,7 @@ type Config struct {
 	Transport     *transport.Transport
 	Codec         *protocol.Codec
 	Logger        *logging.Logger
+	Emitter       events.Emitter // Optional: nil defaults to NopEmitter
 	Mode          transport.Mode
 	StatsInterval time.Duration // 0 to disable periodic stats
 }
@@ -180,11 +183,17 @@ func New(cfg Config) (*Bridge, error) {
 		return nil, fmt.Errorf("logger is required")
 	}
 
+	emitter := cfg.Emitter
+	if emitter == nil {
+		emitter = events.NopEmitter{}
+	}
+
 	b := &Bridge{
 		capture:        cfg.Capture,
 		transport:      cfg.Transport,
 		codec:          cfg.Codec,
 		logger:         cfg.Logger,
+		emitter:        emitter,
 		stats:          &Stats{},
 		mode:           cfg.Mode,
 		statsInterval:  cfg.StatsInterval,
@@ -350,11 +359,22 @@ func (b *Bridge) Run(ctx context.Context) error {
 	return nil
 }
 
-// setState updates the connection state.
+// setState updates the connection state and emits a state_changed event on transitions.
 func (b *Bridge) setState(state State) {
 	b.stateMu.Lock()
-	defer b.stateMu.Unlock()
+	prev := b.state
 	b.state = state
+	b.stateMu.Unlock()
+
+	if prev != state {
+		data := events.StateChangedData{State: state.String()}
+		if state == StateConnected {
+			if addr := b.transport.PeerAddr(); addr != nil {
+				data.PeerAddr = addr.String()
+			}
+		}
+		b.emitter.Emit(events.EventStateChanged, data)
+	}
 }
 
 // captureLoop reads packets from pcap and sends them to the send channel.
@@ -560,15 +580,24 @@ func (b *Bridge) handlePong(timestamp int64) {
 	b.stats.AddRTTSample(rtt)
 
 	// Check for RTT spike
+	isSpike := false
 	if spiked, oldRTT, newRTT := b.stats.CheckRTTSpike(); spiked {
 		b.logger.Warn("RTT spike: %v -> %v", oldRTT.Round(time.Millisecond), newRTT.Round(time.Millisecond))
+		isSpike = true
 	}
 
 	// Check against threshold
-	if rtt > RTTAlertThreshold {
-		b.logger.Warn("[!] RTT %v exceeds Xbox 360 System Link threshold (%v)",
+	exceedsThreshold := rtt > RTTAlertThreshold
+	if exceedsThreshold {
+		b.logger.Warn("[!] RTT %v exceeds Xbox System Link threshold (%v)",
 			rtt.Round(time.Millisecond), RTTAlertThreshold)
 	}
+
+	b.emitter.Emit(events.EventLatency, events.LatencyData{
+		RTTMs:            float64(rtt) / float64(time.Millisecond),
+		IsSpike:          isSpike,
+		ExceedsThreshold: exceedsThreshold,
+	})
 
 	b.logger.Trace("PONG received: RTT=%v", rtt.Round(time.Millisecond))
 }
@@ -651,7 +680,9 @@ func (b *Bridge) sendPing() {
 
 		if missed >= MaxMissedPongs {
 			b.pingMu.Unlock()
+			msg := fmt.Sprintf("peer unresponsive (missed %d pongs)", missed)
 			b.logger.Warn("Peer unresponsive (missed %d pongs), disconnecting...", missed)
+			b.emitter.Emit(events.EventError, events.ErrorData{Message: msg})
 			b.setState(StateDisconnected)
 			if b.cancelFunc != nil {
 				b.cancelFunc()
@@ -740,6 +771,19 @@ func (b *Bridge) printStats() {
 		formatNumber(txPkts), formatBytes(txBytes),
 		formatNumber(rxPkts), formatBytes(rxBytes),
 		rtt.Round(time.Millisecond))
+
+	b.stats.rttMu.RLock()
+	rttAvg := b.stats.RTTAvg
+	b.stats.rttMu.RUnlock()
+
+	b.emitter.Emit(events.EventStats, events.StatsData{
+		TxPackets:    txPkts,
+		TxBytes:      txBytes,
+		RxPackets:    rxPkts,
+		RxBytes:      rxBytes,
+		RTTCurrentMs: float64(rtt) / float64(time.Millisecond),
+		RTTAvgMs:     float64(rttAvg) / float64(time.Millisecond),
+	})
 }
 
 // GetStats returns the current statistics.

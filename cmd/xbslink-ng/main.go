@@ -17,6 +17,7 @@ import (
 	"github.com/xbslink/xbslink-ng/internal/capture"
 	"github.com/xbslink/xbslink-ng/internal/config"
 	"github.com/xbslink/xbslink-ng/internal/discovery"
+	"github.com/xbslink/xbslink-ng/internal/events"
 	"github.com/xbslink/xbslink-ng/internal/logging"
 	"github.com/xbslink/xbslink-ng/internal/protocol"
 	"github.com/xbslink/xbslink-ng/internal/transport"
@@ -78,6 +79,7 @@ Flags for listen/connect:
   --key             Pre-shared key for authentication (strongly recommended)
   --log             Log level: error|warn|info|debug|trace (default: info)
   --stats-interval  Seconds between stats output, 0 to disable (default: 30)
+  --events-output   Write JSON Line events to: stdout, stderr, or a file path (disabled if empty)
 
 Examples:
   # List network interfaces
@@ -128,6 +130,7 @@ func runListen(args []string) {
 	key := fs.String("key", "", "Pre-shared key for authentication")
 	logLevel := fs.String("log", defaultLogLevel, "Log level: error|warn|info|debug|trace")
 	statsInterval := fs.Uint("stats-interval", defaultStatsInterval, "Seconds between stats output (0 to disable)")
+	eventsOutput := fs.String("events-output", "", "Write JSON Line events to: stdout, stderr, or a file path")
 
 	fs.Parse(args)
 
@@ -142,7 +145,7 @@ func runListen(args []string) {
 		os.Exit(1)
 	}
 
-	runBridge(transport.ModeListen, uint16(*port), "", *ifaceName, *xboxMAC, *key, *logLevel, time.Duration(*statsInterval)*time.Second)
+	runBridge(transport.ModeListen, uint16(*port), "", *ifaceName, *xboxMAC, *key, *logLevel, time.Duration(*statsInterval)*time.Second, *eventsOutput)
 }
 
 func runConnect(args []string) {
@@ -155,6 +158,7 @@ func runConnect(args []string) {
 	key := fs.String("key", "", "Pre-shared key for authentication")
 	logLevel := fs.String("log", defaultLogLevel, "Log level: error|warn|info|debug|trace")
 	statsInterval := fs.Uint("stats-interval", defaultStatsInterval, "Seconds between stats output (0 to disable)")
+	eventsOutput := fs.String("events-output", "", "Write JSON Line events to: stdout, stderr, or a file path")
 
 	fs.Parse(args)
 
@@ -175,10 +179,10 @@ func runConnect(args []string) {
 		os.Exit(1)
 	}
 
-	runBridge(transport.ModeConnect, uint16(*port), *address, *ifaceName, *xboxMAC, *key, *logLevel, time.Duration(*statsInterval)*time.Second)
+	runBridge(transport.ModeConnect, uint16(*port), *address, *ifaceName, *xboxMAC, *key, *logLevel, time.Duration(*statsInterval)*time.Second, *eventsOutput)
 }
 
-func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr, key, logLevelStr string, statsInterval time.Duration) {
+func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr, key, logLevelStr string, statsInterval time.Duration, eventsOutput string) {
 	// Parse log level
 	level, err := logging.ParseLevel(logLevelStr)
 	if err != nil {
@@ -189,8 +193,19 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 	// Create logger
 	logger := logging.NewLogger(level)
 
+	// Create event emitter
+	emitter, err := createEmitter(eventsOutput)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating event emitter: %v\n", err)
+		os.Exit(1)
+	}
+	defer emitter.Close()
+
 	// Print banner
 	logger.Info("xbslink-ng %s starting", Version)
+	if eventsOutput != "" {
+		logger.Info("Events output: %s", eventsOutput)
+	}
 
 	// Check Npcap on Windows
 	if runtime.GOOS == "windows" {
@@ -304,6 +319,7 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 		Transport:     trans,
 		Codec:         codec,
 		Logger:        logger,
+		Emitter:       emitter,
 		Mode:          mode,
 		StatsInterval: statsInterval,
 	})
@@ -321,10 +337,10 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 	if needsDiscovery {
 		if mode == transport.ModeListen {
 			// Run discovery in background for listen mode
-			go runBackgroundDiscovery(ctx, ifaceName, br, cfg, logger)
+			go runBackgroundDiscovery(ctx, ifaceName, br, cfg, logger, emitter)
 		} else {
 			// Run discovery in foreground for connect mode (blocking)
-			mac = runForegroundDiscovery(ctx, ifaceName, logger)
+			mac = runForegroundDiscovery(ctx, ifaceName, logger, emitter)
 			if mac == nil {
 				// Discovery was cancelled or failed
 				os.Exit(1)
@@ -369,7 +385,7 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 }
 
 // runBackgroundDiscovery runs Xbox discovery in the background and sets capture when found.
-func runBackgroundDiscovery(ctx context.Context, ifaceName string, br *bridge.Bridge, cfg *config.Config, logger *logging.Logger) {
+func runBackgroundDiscovery(ctx context.Context, ifaceName string, br *bridge.Bridge, cfg *config.Config, logger *logging.Logger, emitter events.Emitter) {
 	result, err := discovery.Discover(ctx, discovery.Config{
 		Interface: ifaceName,
 		Logger:    logger,
@@ -386,6 +402,7 @@ func runBackgroundDiscovery(ctx context.Context, ifaceName string, br *bridge.Br
 
 	mac := result.MAC
 	logger.Info("Found Xbox: %s", mac)
+	emitter.Emit(events.EventDiscovery, events.DiscoveryData{MAC: mac.String()})
 
 	// Save discovered MAC to config
 	cfg.SetXboxMAC(mac)
@@ -416,7 +433,7 @@ func runBackgroundDiscovery(ctx context.Context, ifaceName string, br *bridge.Br
 
 // runForegroundDiscovery runs Xbox discovery in the foreground (blocking).
 // Returns nil if discovery was cancelled or failed.
-func runForegroundDiscovery(ctx context.Context, ifaceName string, logger *logging.Logger) net.HardwareAddr {
+func runForegroundDiscovery(ctx context.Context, ifaceName string, logger *logging.Logger, emitter events.Emitter) net.HardwareAddr {
 	// Create a cancellable context for discovery
 	discoveryCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -445,5 +462,25 @@ func runForegroundDiscovery(ctx context.Context, ifaceName string, logger *loggi
 	}
 
 	logger.Info("Found Xbox: %s", result.MAC)
+	emitter.Emit(events.EventDiscovery, events.DiscoveryData{MAC: result.MAC.String()})
 	return result.MAC
+}
+
+// createEmitter creates an Emitter based on the --events-output flag value.
+// Returns a NopEmitter if the value is empty.
+func createEmitter(output string) (events.Emitter, error) {
+	switch output {
+	case "":
+		return events.NopEmitter{}, nil
+	case "stdout":
+		return events.NewJSONLineWriter(os.Stdout), nil
+	case "stderr":
+		return events.NewJSONLineWriter(os.Stderr), nil
+	default:
+		f, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("open events output %q: %w", output, err)
+		}
+		return events.NewJSONLineWriter(f), nil
+	}
 }
