@@ -477,7 +477,11 @@ func createEmitter(output string) (events.Emitter, error) {
 	case "stderr":
 		return events.NewJSONLineWriter(os.Stderr), nil
 	default:
-		f, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		flags := os.O_WRONLY | os.O_APPEND
+		if _, err := os.Stat(output); os.IsNotExist(err) {
+			flags |= os.O_CREATE
+		}
+		f, err := os.OpenFile(output, flags, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("open events output %q: %w", output, err)
 		}
