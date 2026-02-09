@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -182,6 +183,20 @@ func runConnect(args []string) {
 	runBridge(transport.ModeConnect, uint16(*port), *address, *ifaceName, *xboxMAC, *key, *logLevel, time.Duration(*statsInterval)*time.Second, *eventsOutput)
 }
 
+// getBackoffDelay returns the backoff delay for a given reconnection attempt.
+func getBackoffDelay(attempt int) time.Duration {
+	backoffs := []time.Duration{
+		1 * time.Second,
+		2 * time.Second,
+		5 * time.Second,
+		10 * time.Second,
+	}
+	if attempt < len(backoffs) {
+		return backoffs[attempt]
+	}
+	return 10 * time.Second // Cap at 10s
+}
+
 func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr, key, logLevelStr string, statsInterval time.Duration, eventsOutput string) {
 	// Parse log level
 	level, err := logging.ParseLevel(logLevelStr)
@@ -297,90 +312,174 @@ func runBridge(mode transport.Mode, port uint16, peerAddr, ifaceName, xboxMACStr
 		}
 	}
 
-	// Create transport
-	trans, err := transport.New(transport.Config{
-		Mode:      mode,
-		LocalPort: port,
-		PeerAddr:  peerAddr,
-		Codec:     codec,
-		Logger:    logger,
-	})
-	if err != nil {
-		logger.Error("Failed to create transport: %v", err)
-		if cap != nil {
-			cap.Close()
-		}
-		os.Exit(1)
-	}
+	// Create application-level context (cancelled only by user signals)
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
 
-	// Create bridge (capture may be nil)
-	br, err := bridge.New(bridge.Config{
-		Capture:       cap,
-		Transport:     trans,
-		Codec:         codec,
-		Logger:        logger,
-		Emitter:       emitter,
-		Mode:          mode,
-		StatsInterval: statsInterval,
-	})
-	if err != nil {
-		logger.Error("Failed to create bridge: %v", err)
-		trans.Close()
-		if cap != nil {
-			cap.Close()
-		}
-		os.Exit(1)
-	}
+	// Set up signal handler for graceful application shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		logger.Info("Received signal %v, shutting down...", sig)
+		appCancel()
+	}()
 
-	// If discovery is needed, run it in background (for listen mode) or foreground (for connect mode)
-	ctx := context.Background()
-	if needsDiscovery {
-		if mode == transport.ModeListen {
-			// Run discovery in background for listen mode
-			go runBackgroundDiscovery(ctx, ifaceName, br, cfg, logger, emitter)
+	// If discovery is needed in connect mode, run it once before reconnection loop
+	if needsDiscovery && mode == transport.ModeConnect {
+		// Run discovery in foreground for connect mode (blocking)
+		mac = runForegroundDiscovery(appCtx, ifaceName, logger, emitter)
+		if mac == nil {
+			// Discovery was cancelled or failed
+			os.Exit(1)
+		}
+
+		// Save discovered MAC
+		cfg.SetXboxMAC(mac)
+		if err := cfg.Save(); err != nil {
+			logger.Warn("Failed to save config: %v", err)
 		} else {
-			// Run discovery in foreground for connect mode (blocking)
-			mac = runForegroundDiscovery(ctx, ifaceName, logger, emitter)
-			if mac == nil {
-				// Discovery was cancelled or failed
-				os.Exit(1)
-			}
-
-			// Save discovered MAC
-			cfg.SetXboxMAC(mac)
-			if err := cfg.Save(); err != nil {
-				logger.Warn("Failed to save config: %v", err)
-			} else {
-				logger.Info("Saved Xbox MAC to config: %s", mac)
-			}
-
-			// Create capture with discovered MAC
-			logger.Info("Xbox MAC: %s", mac)
-			cap, err = capture.New(capture.Config{
-				Interface: ifaceName,
-				XboxMAC:   mac,
-				Logger:    logger,
-			})
-			if err != nil {
-				logger.Error("Failed to open capture: %v", err)
-				trans.Close()
-				os.Exit(1)
-			}
-
-			// Set capture on bridge
-			if err := br.SetCapture(cap); err != nil {
-				logger.Error("Failed to set capture: %v", err)
-				cap.Close()
-				trans.Close()
-				os.Exit(1)
-			}
+			logger.Info("Saved Xbox MAC to config: %s", mac)
 		}
+
+		// Create capture with discovered MAC
+		logger.Info("Xbox MAC: %s", mac)
+		cap, err = capture.New(capture.Config{
+			Interface: ifaceName,
+			XboxMAC:   mac,
+			Logger:    logger,
+		})
+		if err != nil {
+			logger.Error("Failed to open capture: %v", err)
+			os.Exit(1)
+		}
+		needsDiscovery = false // Discovery complete
 	}
 
-	// Run until shutdown
-	if err := br.Run(ctx); err != nil {
-		logger.Error("Bridge error: %v", err)
-		os.Exit(1)
+	// Reconnection loop
+	attempt := 0
+	for {
+		// Check for application shutdown
+		if appCtx.Err() != nil {
+			logger.Info("Application shutting down")
+			if cap != nil {
+				cap.Close()
+			}
+			return
+		}
+
+		// Log connection attempt
+		if attempt > 0 {
+			if mode == transport.ModeListen {
+				logger.Info("Waiting for new peer connection...")
+			} else {
+				logger.Info("Reconnection attempt %d...", attempt)
+			}
+		}
+
+		// Create connection-scoped context
+		connCtx, connCancel := context.WithCancel(appCtx)
+
+		// Create fresh transport for this connection
+		trans, err := transport.New(transport.Config{
+			Mode:      mode,
+			LocalPort: port,
+			PeerAddr:  peerAddr,
+			Codec:     codec,
+			Logger:    logger,
+		})
+		if err != nil {
+			logger.Error("Failed to create transport: %v", err)
+			connCancel()
+			if cap != nil {
+				cap.Close()
+			}
+			os.Exit(1) // Fatal error, can't continue
+		}
+
+		// Create fresh bridge for this connection (reuse capture if available)
+		br, err := bridge.New(bridge.Config{
+			Capture:       cap,
+			Transport:     trans,
+			Codec:         codec,
+			Logger:        logger,
+			Emitter:       emitter,
+			Mode:          mode,
+			StatsInterval: statsInterval,
+		})
+		if err != nil {
+			logger.Error("Failed to create bridge: %v", err)
+			trans.Close()
+			connCancel()
+			if cap != nil {
+				cap.Close()
+			}
+			os.Exit(1) // Fatal error
+		}
+
+		// If discovery is needed in listen mode, run it in background for this connection
+		if needsDiscovery && mode == transport.ModeListen {
+			go runBackgroundDiscovery(connCtx, ifaceName, br, cfg, logger, emitter)
+		}
+
+		// Run the bridge (blocks until disconnect or error)
+		err = br.Run(connCtx)
+
+		// Clean up this connection
+		trans.Close()
+		connCancel()
+
+		// Check for application shutdown
+		if appCtx.Err() != nil {
+			logger.Info("Application shutting down")
+			if cap != nil {
+				cap.Close()
+			}
+			return
+		}
+
+		// Decide whether to reconnect
+		if errors.Is(err, bridge.ErrPeerDisconnected) {
+			// Peer disconnected, reconnect
+			logger.Info("Peer disconnected, preparing to reconnect...")
+
+			// Reset codec nonces for next connection
+			codec.ResetRecvNonce()
+
+			// Apply backoff for connect mode
+			if mode == transport.ModeConnect {
+				delay := getBackoffDelay(attempt)
+				logger.Info("Waiting %v before reconnect...", delay)
+
+				select {
+				case <-time.After(delay):
+					// Continue to next iteration
+				case <-appCtx.Done():
+					logger.Info("Application shutting down during backoff")
+					if cap != nil {
+						cap.Close()
+					}
+					return
+				}
+			}
+
+			attempt++
+			continue
+		} else if err != nil {
+			// Other error - fatal
+			logger.Error("Bridge error: %v", err)
+			if cap != nil {
+				cap.Close()
+			}
+			os.Exit(1)
+		} else {
+			// Normal shutdown (nil error)
+			logger.Info("Bridge stopped normally")
+			if cap != nil {
+				cap.Close()
+			}
+			return
+		}
 	}
 }
 

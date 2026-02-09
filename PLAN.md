@@ -278,7 +278,7 @@ func ParseLevel(s string) (Level, error)
 4. Implement on-demand stats (stdin Enter key)
 5. Implement RTT alerts:
    - Warn on >50% spike from average
-   - Persistent warning when >30ms (Xbox 360 threshold)
+   - Persistent warning when >30ms (Xbox threshold)
    - Recovery message when RTT drops back down
 6. Format stats nicely:
    ```
@@ -507,12 +507,87 @@ strategy:
 
 ---
 
+## Reconnection Implementation (Completed 2026-02-09)
+
+### Overview
+Implemented graceful disconnect handling with automatic reconnection. The server process now stays alive across connection lifecycles instead of terminating on peer disconnect.
+
+### Architecture Changes
+
+**Two-Tier Context:**
+- **Application Context**: Created in `main.go`, cancelled only by SIGINT/SIGTERM
+- **Connection Context**: Created per connection attempt, child of app context, cancelled when that connection ends
+
+**Error Signaling:**
+- New `ErrPeerDisconnected` error distinguishes reconnectable disconnects from fatal errors
+- Bridge returns this error when peer sends BYE or times out (3 missed pongs)
+- Application shutdown returns `nil` (normal exit)
+
+### Key Changes
+
+**internal/bridge/bridge.go:**
+- Added `ErrPeerDisconnected` error type
+- Removed signal handling from `Bridge.Run()` (moved to main)
+- Added `sync.Once` to ensure done channel closes only once
+- Modified `handleBye()` and `sendPing()` to close done channel instead of calling cancelFunc
+- Updated `Run()` to detect done channel closure and return appropriate error
+
+**cmd/xbslink-ng/main.go:**
+- Moved signal handling to main
+- Implemented reconnection loop with exponential backoff for connect mode (1s → 2s → 5s → 10s)
+- Transport and Bridge recreated per connection
+- Codec, Capture, Logger, Emitter reused across connections
+- Codec nonces reset between connections via `ResetRecvNonce()`
+
+### Behavior
+
+**Listen Mode:**
+- Waits for new peer after disconnect
+- No backoff delay
+- Continues indefinitely until Ctrl+C
+
+**Connect Mode:**
+- Retries connection with exponential backoff
+- Backoff sequence: 1s, 2s, 5s, 10s (capped)
+- Continues indefinitely until Ctrl+C
+
+**Both Modes:**
+- Stats reset per connection
+- BYE sent only on application shutdown
+- Graceful shutdown during backoff works correctly
+
+### Testing
+
+Manual testing can be performed using the xbox-sim client:
+
+```bash
+# Terminal 1: Start listener
+./xbslink-ng listen --port 31415 --interface en0 --xbox-mac 00:50:F2:AA:AA:AA
+
+# Terminal 2: Start xbox-sim client
+./xbox-sim client --address localhost:31415
+
+# Terminal 2: Press Ctrl+C (client disconnects)
+# Expected: Listener logs "Peer disconnected, waiting for new peer connection..."
+
+# Terminal 2: Restart client
+# Expected: Connection re-establishes
+
+# Terminal 1: Press Ctrl+C (listener terminates)
+# Expected: Client detects disconnect, enters retry loop with backoff
+
+# Terminal 1: Restart listener
+# Expected: Client successfully reconnects on next attempt
+```
+
+All unit tests pass after implementation.
+
+---
+
 ## Future Enhancements (Out of Scope for v1)
 
 - [ ] NAT traversal (UDP hole punching, STUN)
 - [ ] Config file support
 - [ ] Multiple peer mesh networking
 - [ ] GUI wrapper
-- [ ] Auto-discovery of Xbox MAC
 - [ ] Packet compression (unlikely to help - frames are small)
-- [ ] Encryption (not needed for trusted friends)

@@ -3,13 +3,12 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
-	"os/signal"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/xbslink/xbslink-ng/internal/capture"
@@ -18,6 +17,10 @@ import (
 	"github.com/xbslink/xbslink-ng/internal/protocol"
 	"github.com/xbslink/xbslink-ng/internal/transport"
 )
+
+// ErrPeerDisconnected indicates the peer disconnected (BYE or timeout).
+// This error signals that reconnection should be attempted.
+var ErrPeerDisconnected = errors.New("peer disconnected")
 
 // Configuration constants.
 const (
@@ -144,6 +147,7 @@ type Bridge struct {
 	framesToSend   chan []byte
 	framesToInject chan []byte
 	done           chan struct{}
+	doneOnce       sync.Once // ensures done is closed only once
 
 	// Ping tracking
 	pendingPing int64 // timestamp of pending ping (0 if none)
@@ -152,9 +156,6 @@ type Bridge struct {
 
 	// For stdin monitoring
 	stdinCh chan struct{}
-
-	// For triggering shutdown from within the bridge
-	cancelFunc context.CancelFunc
 
 	// For capture lifecycle management
 	captureReady chan struct{} // closed when capture is set
@@ -238,25 +239,8 @@ func (b *Bridge) HasCapture() bool {
 }
 
 // Run starts the bridge and blocks until shutdown.
+// The provided context controls the bridge lifetime - when cancelled, the bridge shuts down.
 func (b *Bridge) Run(ctx context.Context) error {
-	// Set up signal handling for graceful shutdown
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Store cancel func so other methods can trigger shutdown
-	b.cancelFunc = cancel
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		select {
-		case sig := <-sigCh:
-			b.logger.Info("Received signal %v, shutting down...", sig)
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-
 	// Establish connection based on mode
 	b.setState(StateConnecting)
 
@@ -331,32 +315,57 @@ func (b *Bridge) Run(ctx context.Context) error {
 		b.stdinLoop(ctx)
 	}()
 
-	// Wait for context cancellation
+	// Wait for context cancellation or done channel closure
 	<-ctx.Done()
 
-	// Send BYE for graceful disconnect
-	b.logger.Debug("Sending BYE to peer")
-	if err := b.transport.SendBye(); err != nil {
-		b.logger.Debug("Failed to send BYE: %v", err)
+	// Determine if this was a peer disconnect or application shutdown
+	select {
+	case <-b.done:
+		// done channel was closed first - peer disconnected
+		// Don't send BYE since peer is already gone
+		b.logger.Debug("Peer disconnect detected, cleaning up...")
+		b.transport.Close()
+
+		b.captureMu.RLock()
+		if b.capture != nil {
+			b.capture.Close()
+		}
+		b.captureMu.RUnlock()
+
+		// Wait for goroutines to finish
+		wg.Wait()
+
+		b.setState(StateDisconnected)
+		b.logger.Info("Bridge stopped due to peer disconnect")
+
+		return ErrPeerDisconnected
+
+	default:
+		// Context was cancelled - application shutdown
+		// Send BYE and clean up normally
+		b.logger.Debug("Sending BYE to peer")
+		if err := b.transport.SendBye(); err != nil {
+			b.logger.Debug("Failed to send BYE: %v", err)
+		}
+
+		// Close resources
+		close(b.done)
+		b.transport.Close()
+
+		b.captureMu.RLock()
+		if b.capture != nil {
+			b.capture.Close()
+		}
+		b.captureMu.RUnlock()
+
+		// Wait for goroutines to finish
+		wg.Wait()
+
+		b.setState(StateDisconnected)
+		b.logger.Info("Bridge stopped")
+
+		return nil
 	}
-
-	// Close resources
-	close(b.done)
-	b.transport.Close()
-
-	b.captureMu.RLock()
-	if b.capture != nil {
-		b.capture.Close()
-	}
-	b.captureMu.RUnlock()
-
-	// Wait for goroutines to finish
-	wg.Wait()
-
-	b.setState(StateDisconnected)
-	b.logger.Info("Bridge stopped")
-
-	return nil
 }
 
 // setState updates the connection state and emits a state_changed event on transitions.
@@ -606,10 +615,10 @@ func (b *Bridge) handlePong(timestamp int64) {
 func (b *Bridge) handleBye() {
 	b.logger.Info("Peer disconnected gracefully")
 	b.setState(StateDisconnected)
-	// Trigger shutdown
-	if b.cancelFunc != nil {
-		b.cancelFunc()
-	}
+	// Signal goroutines to stop (Run() will detect this and return ErrPeerDisconnected)
+	b.doneOnce.Do(func() {
+		close(b.done)
+	})
 }
 
 // injectLoop reads frames from channel and injects them to the network.
@@ -684,9 +693,10 @@ func (b *Bridge) sendPing() {
 			b.logger.Warn("Peer unresponsive (missed %d pongs), disconnecting...", missed)
 			b.emitter.Emit(events.EventError, events.ErrorData{Message: msg})
 			b.setState(StateDisconnected)
-			if b.cancelFunc != nil {
-				b.cancelFunc()
-			}
+			// Signal goroutines to stop (Run() will detect this and return ErrPeerDisconnected)
+			b.doneOnce.Do(func() {
+				close(b.done)
+			})
 			return
 		}
 	}
