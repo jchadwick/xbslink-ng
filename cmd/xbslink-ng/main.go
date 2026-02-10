@@ -572,9 +572,9 @@ func createEmitter(output string) (events.Emitter, error) {
 	case "":
 		return events.NopEmitter{}, nil
 	case "stdout":
-		return events.NewJSONLineWriter(os.Stdout), nil
+		return events.NewAsyncJSONLineWriter(os.Stdout), nil
 	case "stderr":
-		return events.NewJSONLineWriter(os.Stderr), nil
+		return events.NewAsyncJSONLineWriter(os.Stderr), nil
 	default:
 		flags := os.O_WRONLY | os.O_APPEND
 		if _, err := os.Stat(output); os.IsNotExist(err) {
@@ -584,6 +584,6 @@ func createEmitter(output string) (events.Emitter, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open events output %q: %w", output, err)
 		}
-		return events.NewJSONLineWriter(f), nil
+		return events.NewAsyncJSONLineWriter(f), nil
 	}
 }

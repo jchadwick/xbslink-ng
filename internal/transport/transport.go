@@ -202,7 +202,10 @@ func (t *Transport) WaitForPeer(ctx context.Context) error {
 		}
 
 		if msg.Type != protocol.MsgHello {
-			t.logger.Debug("Expected HELLO from %s, got %s", addr, protocol.MessageTypeName(msg.Type))
+			// Send BYE to signal we need fresh handshake (enables sub-second session reset detection)
+			bye := t.codec.EncodeBye()
+			t.conn.WriteToUDP(bye, addr)
+			t.logger.Debug("Expected HELLO from %s, got %s, sent BYE", addr, protocol.MessageTypeName(msg.Type))
 			continue
 		}
 
@@ -211,6 +214,9 @@ func (t *Transport) WaitForPeer(ctx context.Context) error {
 		// Store peer address and challenge
 		t.peerAddr = addr
 		t.challenge = msg.Challenge
+
+		// Reset nonce state for new session (prevents "replay attack detected" on reconnection)
+		t.codec.ResetRecvNonce()
 
 		// Send HELLO_ACK with challenge response
 		ack := t.codec.EncodeHelloAck(msg.Challenge)
@@ -329,6 +335,9 @@ func (t *Transport) attemptHandshake(ctx context.Context) error {
 			}
 			t.logger.Debug("Challenge-response verified")
 		}
+
+		// Reset nonce state for new session (prevents "replay attack detected" on reconnection)
+		t.codec.ResetRecvNonce()
 
 		t.mu.Lock()
 		t.connected = true
