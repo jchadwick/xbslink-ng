@@ -36,32 +36,54 @@ Pre-commit hooks enforced via Lefthook (gofmt, go vet). Pre-push runs tests.
 
 ## Releasing
 
-**Before releasing**, ensure the Dockerfile version matches go.mod:
+### Automatic Releases (Recommended)
+
+Every successful push to `main` automatically triggers a release:
+
+1. **CI workflow** runs (lint, test, build verification)
+2. **Release workflow** triggers automatically when CI passes
+3. Version is auto-bumped (patch version increment: v0.0.1 → v0.0.2)
+4. Builds binaries for all platforms
+5. Creates GitHub Release with the new version tag
+6. Publishes Docker images to ghcr.io
+7. `notify-addon-release.yaml` fires a `repository_dispatch` to the addon repo
+
+**IMPORTANT**: After pushing to main, ALWAYS check the GitHub Actions status:
+```bash
+gh run watch  # Watch CI, then release workflow
+```
+If any workflow fails, fix it immediately.
+
+### Manual Releases
+
+For specific versions (e.g., major/minor bumps), either:
+
+**Option 1: Git tag (triggers release workflow)**
+```bash
+git tag v1.0.0 && git push --tags
+```
+
+**Option 2: Manual workflow dispatch**
+```bash
+gh workflow run release.yml -f version=v1.0.0
+```
+
+### Before Releasing
+
+Ensure the Dockerfile version matches go.mod:
 1. Check `go.mod` for Go version (e.g., `go 1.25`)
 2. Update `Dockerfile` line 3: `FROM golang:1.25-alpine AS builder`
 3. Update `.github/workflows/ci.yml` and `release.yml` with same version
 
-Then tag and release:
+### Release Artifacts
 
-```bash
-git tag v0.0.X && git push --tags
-```
-
-This triggers `.github/workflows/release.yml` which:
-1. Builds static Linux binaries (amd64, armv7, arm64) via Docker + QEMU
-2. Builds native macOS (amd64, arm64) and Windows (amd64) binaries
-3. Creates a GitHub Release with all artifacts
-4. `notify-addon-release.yaml` fires a `repository_dispatch` to the addon repo
+The release workflow produces:
+1. Static Linux binaries (amd64, armv7, arm64) via Docker + QEMU
+2. Native macOS (amd64, arm64) and Windows (amd64) binaries
+3. GitHub Release with all artifacts
+4. Docker images with tags: `latest`, `vX.Y.Z`, `X.Y.Z`, `<sha>`
 
 See the addon repo (`jchadwick/home-assistant-addons`) for how it consumes new releases.
-
-Dev builds: every push to `main` creates a rolling `dev-latest` pre-release + Docker image.
-
-**IMPORTANT**: After committing and pushing to main, ALWAYS check the GitHub Actions status:
-```bash
-gh run watch  # Watch the latest workflow run
-```
-If the build fails, fix it immediately before releasing a tag.
 
 ## Architecture Notes
 

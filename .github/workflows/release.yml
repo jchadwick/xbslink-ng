@@ -10,11 +10,101 @@ on:
         description: "Version to release (e.g., v1.0.0)"
         required: true
         type: string
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+    branches:
+      - main
 
 jobs:
+  determine-version:
+    name: Determine Version
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      is_dev: ${{ steps.version.outputs.IS_DEV }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tag analysis
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            # Manual trigger - use input version
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "IS_DEV=false" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            # Auto-release from CI - bump patch version
+            LATEST_TAG=$(git tag -l "v*.*.*" | sort -V | tail -n1)
+            if [ -z "$LATEST_TAG" ]; then
+              # No existing tags, start at v0.0.1
+              NEW_VERSION="v0.0.1"
+            else
+              # Extract version components
+              LATEST_TAG=${LATEST_TAG#v}  # Remove 'v' prefix
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_TAG"
+              # Bump patch version
+              PATCH=$((PATCH + 1))
+              NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+            fi
+            echo "VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "IS_DEV=false" >> $GITHUB_OUTPUT
+            echo "Auto-bumped version to $NEW_VERSION"
+          else
+            # Tag push - use tag name
+            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "IS_DEV=false" >> $GITHUB_OUTPUT
+          fi
+
+  download-ci-artifacts:
+    name: Download CI Artifacts
+    runs-on: ubuntu-latest
+    needs: determine-version
+    if: github.event_name == 'workflow_run'
+    outputs:
+      artifacts_found: ${{ steps.check.outputs.found }}
+
+    steps:
+      - name: Download artifacts from CI workflow
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: artifacts
+        continue-on-error: true
+
+      - name: Check if artifacts were downloaded
+        id: check
+        run: |
+          if [ -d "artifacts" ] && [ "$(ls -A artifacts)" ]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found and downloaded CI artifacts"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "⚠️  No CI artifacts found, will trigger builds"
+          fi
+
+      - name: Upload downloaded artifacts for release job
+        if: steps.check.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts-bundle
+          path: artifacts/
+
   build-linux:
     name: Build Linux ${{ matrix.arch }}
     runs-on: ubuntu-latest
+    needs: [determine-version, download-ci-artifacts]
+    if: |
+      always() &&
+      needs.determine-version.result == 'success' &&
+      (github.event_name != 'workflow_run' || needs.download-ci-artifacts.outputs.artifacts_found != 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -36,20 +126,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Build static binary
         run: |
           docker buildx build \
             --platform ${{ matrix.platform }} \
-            --build-arg VERSION=${{ steps.version.outputs.VERSION }} \
+            --build-arg VERSION=${{ needs.determine-version.outputs.version }} \
             --target binary \
             --output type=local,dest=./out \
             -f - . << 'EOF'
@@ -87,6 +168,11 @@ jobs:
   build-other:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ${{ matrix.os }}
+    needs: [determine-version, download-ci-artifacts]
+    if: |
+      always() &&
+      needs.determine-version.result == 'success' &&
+      (github.event_name != 'workflow_run' || needs.download-ci-artifacts.outputs.artifacts_found != 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -126,23 +212,13 @@ jobs:
           echo "CGO_LDFLAGS=-L${{ github.workspace }}/npcap-sdk/Lib/x64" >> $env:GITHUB_ENV
         shell: pwsh
 
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          fi
-        shell: bash
-
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
         run: |
-          go build -v -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o xbslink-ng${{ matrix.ext }} ./cmd/xbslink-ng
+          go build -v -ldflags="-s -w -X main.Version=${{ needs.determine-version.outputs.version }}" -o xbslink-ng${{ matrix.ext }} ./cmd/xbslink-ng
 
       - name: Create archive (tar.gz)
         if: matrix.archive == 'tar.gz'
@@ -163,8 +239,9 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-linux, build-other]
+    needs: [determine-version, download-ci-artifacts, build-linux, build-other]
     runs-on: ubuntu-latest
+    if: always() && needs.determine-version.result == 'success'
     permissions:
       contents: write
 
@@ -172,19 +249,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download CI artifacts bundle
+        if: github.event_name == 'workflow_run' && needs.download-ci-artifacts.outputs.artifacts_found == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-artifacts-bundle
+          path: artifacts
+
+      - name: Download build artifacts
+        if: github.event_name != 'workflow_run' || needs.download-ci-artifacts.outputs.artifacts_found != 'true'
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          fi
 
       - name: List artifacts
         run: find artifacts -type f
@@ -192,10 +268,10 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          name: xbslink-ng ${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ needs.determine-version.outputs.version }}
+          name: xbslink-ng ${{ needs.determine-version.outputs.version }}
           draft: false
-          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+          prerelease: ${{ contains(needs.determine-version.outputs.version, '-') }}
           generate_release_notes: true
           files: |
             artifacts/xbslink-ng-linux-amd64/xbslink-ng-linux-amd64.tar.gz
@@ -222,3 +298,75 @@ jobs:
             - **Linux**: Run with `sudo` or set capabilities
 
             See the [README](https://github.com/${{ github.repository }}#readme) for usage instructions.
+
+  docker:
+    name: Build and Push Docker Image
+    needs: [determine-version, download-ci-artifacts, release]
+    runs-on: ubuntu-latest
+    if: always() && needs.determine-version.result == 'success' && needs.release.result == 'success'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          VERSION=${{ needs.determine-version.outputs.version }}
+          # Remove 'v' prefix for Docker tags if present
+          VERSION_NO_V=${VERSION#v}
+          echo "version_no_v=$VERSION_NO_V" >> $GITHUB_OUTPUT
+          echo "sha_short=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ needs.determine-version.outputs.version }}
+            ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version_no_v }}
+            ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.sha_short }}
+          labels: |
+            org.opencontainers.image.title=xbslink-ng
+            org.opencontainers.image.description=P2P Xbox System Link bridge
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.determine-version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            VERSION=${{ needs.determine-version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Make package public
+        continue-on-error: true
+        run: |
+          # Extract package name from repository
+          PACKAGE_NAME=$(echo ${{ github.repository }} | cut -d'/' -f2)
+
+          # Set package visibility to public
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            /user/packages/container/${PACKAGE_NAME} \
+            -f visibility='public' || echo "Note: Could not set package visibility. Make it public manually at https://github.com/${{ github.repository_owner }}?tab=packages"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
