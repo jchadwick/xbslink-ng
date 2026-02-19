@@ -130,6 +130,67 @@ jobs:
           path: xbslink-ng-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.goos == 'windows' && 'zip' || 'tar.gz' }}
           retention-days: 5  # Keep artifacts for release workflow
 
+  build-linux-cross:
+    name: Build linux/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            platform: linux/arm64
+          - arch: armv7
+            platform: linux/arm/v7
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build static binary
+        run: |
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --build-arg VERSION=ci-${{ github.sha }} \
+            --target binary \
+            --output type=local,dest=./out \
+            -f - . << 'EOF'
+          FROM golang:alpine AS builder
+          ARG VERSION=dev
+
+          RUN apk add --no-cache git make libpcap-dev gcc musl-dev
+
+          WORKDIR /build
+          COPY go.mod go.sum ./
+          RUN go mod download
+          COPY . .
+
+          RUN CGO_ENABLED=1 go build \
+                -ldflags="-s -w -linkmode external -extldflags '-static' -X main.Version=${VERSION}" \
+                -o xbslink-ng \
+                ./cmd/xbslink-ng
+
+          FROM scratch AS binary
+          COPY --from=builder /build/xbslink-ng /xbslink-ng
+          EOF
+
+      - name: Create archive
+        run: |
+          cd out
+          tar -czvf ../xbslink-ng-linux-${{ matrix.arch }}.tar.gz xbslink-ng
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xbslink-ng-linux-${{ matrix.arch }}
+          path: xbslink-ng-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 5
+
   docker:
     name: Build Docker Image
     runs-on: ubuntu-latest
