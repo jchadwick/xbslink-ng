@@ -299,6 +299,16 @@ jobs:
 
             See the [README](https://github.com/${{ github.repository }}#readme) for usage instructions.
 
+      - name: Notify Home Assistant addon repo
+        if: ${{ !contains(needs.determine-version.outputs.version, '-') }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.ADDON_DISPATCH_TOKEN }}
+          repository: jchadwick/home-assistant-addons
+          event-type: xbslink-release
+          client-payload: |
+            {"version": "${{ needs.determine-version.outputs.version }}"}
+
   docker:
     name: Build and Push Docker Image
     needs: [determine-version, download-ci-artifacts, release]
