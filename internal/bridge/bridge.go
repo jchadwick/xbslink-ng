@@ -316,7 +316,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}()
 
 	// Wait for context cancellation or done channel closure
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-b.done:
+	}
 
 	// Determine if this was a peer disconnect or application shutdown
 	select {
