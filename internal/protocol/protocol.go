@@ -31,14 +31,14 @@ const (
 	ChallengeRespLen = 32 // HMAC response to challenge
 
 	// Header sizes.
-	MinHeaderSize       = 1                     // Type only (insecure mode)
-	SecureHeaderSize    = 1 + NonceSize         // Type + Nonce
-	MinPayloadSize      = 0                     // BYE has no payload
-	MaxFrameSize        = 1514                  // Max Ethernet frame size
-	MinEthernetFrame    = 14                    // Min Ethernet frame (header only)
-	HelloPayloadSize    = 2 + ChallengeSize     // version (2) + challenge (16)
-	HelloAckPayloadSize = 2 + ChallengeRespLen  // version (2) + response (32)
-	PingPongPayloadSize = 8                     // timestamp (8 bytes)
+	MinHeaderSize       = 1                    // Type only (insecure mode)
+	SecureHeaderSize    = 1 + NonceSize        // Type + Nonce
+	MinPayloadSize      = 0                    // BYE has no payload
+	MaxFrameSize        = 1514                 // Max Ethernet frame size
+	MinEthernetFrame    = 14                   // Min Ethernet frame (header only)
+	HelloPayloadSize    = 2 + ChallengeSize    // version (2) + challenge (16)
+	HelloAckPayloadSize = 2 + ChallengeRespLen // version (2) + response (32)
+	PingPongPayloadSize = 8                    // timestamp (8 bytes)
 )
 
 // Errors returned by protocol functions.
@@ -145,12 +145,15 @@ func (c *Codec) decode(data []byte) (msgType byte, payload []byte, err error) {
 			return 0, nil, ErrInvalidHMAC
 		}
 
-		// Verify nonce is increasing (replay protection)
-		// Allow nonce 0 on first message, then require strictly increasing
-		if nonce > 0 && nonce <= atomic.LoadUint64(&c.recvNonce) {
-			return 0, nil, ErrReplayDetected
+		// Verify nonce is increasing (replay protection) for non-handshake traffic.
+		// HELLO/HELLO_ACK are exempt so peers can reconnect even if their sender
+		// nonce counter restarts from 1 (e.g. process restart).
+		if msgType != MsgHello && msgType != MsgHelloAck {
+			if nonce > 0 && nonce <= atomic.LoadUint64(&c.recvNonce) {
+				return 0, nil, ErrReplayDetected
+			}
+			atomic.StoreUint64(&c.recvNonce, nonce)
 		}
-		atomic.StoreUint64(&c.recvNonce, nonce)
 
 		return msgType, payload, nil
 	}

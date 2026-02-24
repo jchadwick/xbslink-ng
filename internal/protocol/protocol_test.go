@@ -467,6 +467,47 @@ func TestResetRecvNonce(t *testing.T) {
 	}
 }
 
+func TestDecode_HelloAllowsSessionRestartedNonce(t *testing.T) {
+	listener := NewCodec(testKey)
+
+	peer1 := NewCodec(testKey)
+	hello1, _, err := peer1.EncodeHello()
+	if err != nil {
+		t.Fatalf("first hello encode failed: %v", err)
+	}
+	if _, err := listener.Decode(hello1); err != nil {
+		t.Fatalf("first hello decode failed: %v", err)
+	}
+
+	// Simulate peer restart: sender nonce returns to 1.
+	peer2 := NewCodec(testKey)
+	hello2, _, err := peer2.EncodeHello()
+	if err != nil {
+		t.Fatalf("second hello encode failed: %v", err)
+	}
+	if _, err := listener.Decode(hello2); err != nil {
+		t.Fatalf("second hello decode failed after peer restart: %v", err)
+	}
+}
+
+func TestDecode_HelloAckAllowsSessionRestartedNonce(t *testing.T) {
+	client := NewCodec(testKey)
+
+	server1 := NewCodec(testKey)
+	challenge := make([]byte, ChallengeSize)
+	ack1 := server1.EncodeHelloAck(challenge)
+	if _, err := client.Decode(ack1); err != nil {
+		t.Fatalf("first hello_ack decode failed: %v", err)
+	}
+
+	// Simulate peer restart: sender nonce returns to 1.
+	server2 := NewCodec(testKey)
+	ack2 := server2.EncodeHelloAck(challenge)
+	if _, err := client.Decode(ack2); err != nil {
+		t.Fatalf("second hello_ack decode failed after peer restart: %v", err)
+	}
+}
+
 func TestDecode_EmptyMessage(t *testing.T) {
 	codec := NewCodec(nil)
 
